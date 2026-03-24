@@ -67,3 +67,5 @@ _archive/
 
 # ── Internal dev notes (not for public repo) ──────────────────────────────────
 docs/harden_production_spec.md
+#reset_data.py
+verify_pending.py
