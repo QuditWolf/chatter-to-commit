@@ -1,0 +1,63 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    volumes:
+      - fleet_db:/data
+    environment:
+      FLEET_DB_PATH:         /data/fleet.db
+      FLEET_LLM_BASE_URL:    ${FLEET_LLM_BASE_URL}
+      FLEET_LLM_API_KEY:     ${FLEET_LLM_API_KEY:-EMPTY}
+      FLEET_MODEL:           ${FLEET_MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ}
+      FLEET_LLM_MAX_TOKENS:  ${FLEET_LLM_MAX_TOKENS:-2048}
+      FLEET_LLM_MOCK:        ${FLEET_LLM_MOCK:-false}
+      WA_LISTENER_URL:       http://wa:3001
+    networks:
+      - fleet_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  wa:
+    build:
+      context: .
+      dockerfile: Dockerfile.wa
+    restart: unless-stopped
+    volumes:
+      - wa_session:/session
+    environment:
+      FLEET_API_URL:   http://api:8000
+      WA_GROUP_JID:    ${WA_GROUP_JID}
+      WA_HEALTH_PORT:  "3001"
+      WA_SESSION_DIR:  /session
+      LOG_LEVEL:       ${LOG_LEVEL:-info}
+    networks:
+      - fleet_net
+    depends_on:
+      api:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8080}:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - fleet_net
+    depends_on:
+      - api
+
+volumes:
+  fleet_db:
+  wa_session:
+
+networks:
+  fleet_net:
+    driver: bridge

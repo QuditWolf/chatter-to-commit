@@ -1,0 +1,69 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+dist/
+build/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+
+# ── Node.js ───────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── SQLite databases ──────────────────────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+# Keep the data directory stub
+!fleet_pipeline/data/.gitkeep
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+# Keep the example
+!.env.example
+!fleet_pipeline/wa_listener/.env.example
+
+# ── WhatsApp session (auth tokens — NEVER commit) ─────────────────────────────
+# creds.json and pre-key-*.json contain private cryptographic material.
+fleet_pipeline/wa_listener/session/*
+!fleet_pipeline/wa_listener/session/.gitkeep
+session/*
+!session/.gitkeep
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── PM2 ───────────────────────────────────────────────────────────────────────
+.pm2/
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# (compose files are committed, but not local override)
+docker-compose.override.yml
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+_archive/
+*.bak
+*.tmp
+
+# ── Internal dev notes (not for public repo) ──────────────────────────────────
+docs/harden_production_spec.md

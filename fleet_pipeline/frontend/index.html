@@ -1,0 +1,2006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Fleet Tracker</title>
+<style>
+/* ── Design tokens ────────────────────────────────────────────────── */
+:root {
+  --color-background-primary:   #ffffff;
+  --color-background-secondary: #f5f5f4;
+  --color-background-tertiary:  #eeeeec;
+  --color-background-danger:    #fef2f2;
+  --color-background-warning:   #fffbeb;
+  --color-text-primary:   #1c1b19;
+  --color-text-secondary: #78756e;
+  --color-text-danger:    #991b1b;
+  --color-text-warning:   #92400e;
+  --color-border-primary:   #d1cfc8;
+  --color-border-secondary: #e2e0d8;
+  --color-border-tertiary:  #edecea;
+  --color-border-warning:   #fbbf24;
+  --border-radius-sm: 4px;
+  --border-radius-md: 6px;
+  --border-radius-lg: 8px;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Menlo', monospace;
+}
+
+/* ── Reset ───────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-sans); font-size: 13px; color: var(--color-text-primary); background: var(--color-background-tertiary); line-height: 1.5; }
+button { cursor: pointer; font-family: inherit; }
+input, textarea, select { font-family: inherit; font-size: 12px; }
+
+/* ── App shell ───────────────────────────────────────────────────── */
+.app { min-height: 100vh; display: flex; flex-direction: column; }
+
+/* ── Topbar ──────────────────────────────────────────────────────── */
+.topbar {
+  background: var(--color-background-primary);
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  height: 48px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.logo { font-size: 15px; font-weight: 500; color: var(--color-text-primary); margin-right: 28px; letter-spacing: -0.01em; }
+.nav-tab {
+  padding: 0 16px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color .15s;
+  user-select: none;
+}
+.nav-tab.active { color: var(--color-text-primary); border-bottom-color: var(--color-text-primary); font-weight: 500; }
+.nav-tab:hover:not(.active) { color: var(--color-text-primary); }
+.badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: 11px; font-weight: 500;
+  background: var(--color-background-danger);
+  color: var(--color-text-danger);
+  margin-left: 6px;
+}
+.live { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--color-text-secondary); }
+.pulse { width: 7px; height: 7px; border-radius: 50%; background: #3B6D11; animation: pulse 2s infinite; }
+.pulse.disconnected { background: #A32D2D; animation: none; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+/* ── Spinner ─────────────────────────────────────────────────────── */
+.spinner {
+  display: inline-block; width: 12px; height: 12px;
+  border: 1.5px solid var(--color-border-primary);
+  border-top-color: var(--color-text-secondary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── LLM processing animation ────────────────────────────────────── */
+.llm-status {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 11px; color: var(--color-text-secondary);
+  padding: 5px 10px;
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.llm-dots { display: inline-flex; align-items: center; gap: 3px; }
+.llm-dots span {
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--color-text-secondary);
+  animation: llm-dot 1.4s ease-in-out infinite;
+}
+.llm-dots span:nth-child(2) { animation-delay: 0.25s; }
+.llm-dots span:nth-child(3) { animation-delay: 0.5s; }
+@keyframes llm-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.75); }
+  40% { opacity: 1; transform: scale(1.1); }
+}
+.pending-msg-row { border-left: 2px solid var(--color-border-warning) !important; }
+
+/* ── Offline / reprocess banner ──────────────────────────────────── */
+.reprocess-banner {
+  display: none; align-items: center; gap: 10px;
+  background: var(--color-background-warning);
+  border: 0.5px solid var(--color-border-warning);
+  border-radius: var(--border-radius-md);
+  padding: 8px 14px; font-size: 12px; color: var(--color-text-warning);
+  margin-bottom: 4px;
+}
+.reprocess-banner.visible { display: flex; }
+.reprocess-banner.success { background:#f0fdf4; border-color:#86efac; color:#166534; }
+
+/* ── Tab panels ──────────────────────────────────────────────────── */
+.main { display: none; padding: 16px 20px; gap: 16px; flex-direction: column; }
+.main.active { display: flex; }
+
+/* ── KPI grid ────────────────────────────────────────────────────── */
+.kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; }
+.kpi { background: var(--color-background-secondary); border-radius: var(--border-radius-md); padding: 14px 16px; }
+.kpi-label { font-size: 12px; color: var(--color-text-secondary); margin-bottom: 6px; }
+.kpi-val { font-size: 26px; font-weight: 500; color: var(--color-text-primary); line-height: 1; }
+.kpi-sub { font-size: 12px; color: var(--color-text-secondary); margin-top: 5px; }
+.kpi-names { font-size: 12px; margin-top: 5px; color: var(--color-text-secondary); }
+
+/* ── Cards / layout ──────────────────────────────────────────────── */
+.section-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.card {
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: var(--border-radius-lg);
+  padding: 14px 16px;
+}
+.card-title {
+  font-size: 13px; font-weight: 500; color: var(--color-text-primary);
+  margin-bottom: 12px; border-bottom: 0.5px solid var(--color-border-tertiary);
+  padding-bottom: 8px;
+}
+
+/* ── Dots ────────────────────────────────────────────────────────── */
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 5px; flex-shrink: 0; }
+.dot.green  { background: #3B6D11; }
+.dot.amber  { background: #854F0B; }
+.dot.red    { background: #A32D2D; }
+.dot.gray   { background: #888780; }
+.dot.blue   { background: #1a5fa8; }
+
+/* ── Tables ──────────────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+th {
+  text-align: left; color: var(--color-text-secondary); font-weight: 400;
+  font-size: 12px; padding: 4px 8px 8px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+td { padding: 7px 8px; color: var(--color-text-primary); border-bottom: 0.5px solid var(--color-border-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+
+/* ── Status pills ────────────────────────────────────────────────── */
+.pill { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+.pill.loading    { background: #EAF3DE; color: #27500A; }
+.pill.unloading  { background: #E6F1FB; color: #0C447C; }
+.pill.transit    { background: #FAEEDA; color: #633806; }
+.pill.idle       { background: #F1EFE8; color: #5F5E5A; }
+.pill.held       { background: #FCEBEB; color: #791F1F; }
+.pill.committed  { background: #EAF3DE; color: #27500A; }
+.pill.flagged    { background: #FAEEDA; color: #633806; }
+.pill.corrected  { background: #E6F1FB; color: #0C447C; }
+
+/* ── Site analytics panel ────────────────────────────────────────── */
+.site-card {
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-md);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.site-card:last-child { margin-bottom: 0; }
+.site-card-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: var(--color-background-secondary);
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.site-card-name { font-weight: 500; font-size: 13px; flex: 1; }
+.site-type-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 10px;
+  background: var(--color-background-tertiary);
+  color: var(--color-text-secondary);
+  text-transform: uppercase; letter-spacing: .03em;
+}
+.site-panes { display: grid; grid-template-columns: 1fr 1fr; }
+.site-pane { padding: 10px 12px; }
+.site-pane + .site-pane { border-left: 0.5px solid var(--color-border-tertiary); }
+.site-pane-title {
+  font-size: 10px; font-weight: 600; color: var(--color-text-secondary);
+  text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px;
+}
+.site-state-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 3px 0; font-size: 12px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.site-state-row:last-child { border-bottom: none; }
+.site-state-label { color: var(--color-text-secondary); }
+.site-state-trucks { font-weight: 500; max-width: 120px; text-align: right; word-break: break-word; }
+.site-state-trucks.empty { color: var(--color-text-secondary); font-weight: 400; }
+.site-total-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 4px 0; font-size: 12px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.site-total-row:last-child { border-bottom: none; }
+.site-total-num { font-size: 18px; font-weight: 500; color: var(--color-text-primary); line-height: 1; }
+
+/* ── Shift summary ───────────────────────────────────────────────── */
+.shift-box {
+  background: var(--color-background-secondary);
+  border-radius: var(--border-radius-md);
+  padding: 10px 14px;
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 12px;
+}
+.total-box { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.total-pill { padding: 5px 14px; border-radius: 20px; font-size: 13px; font-weight: 500; background: var(--color-background-secondary); color: var(--color-text-primary); }
+
+/* ── NL query ────────────────────────────────────────────────────── */
+.nl-wrap { display: flex; gap: 8px; margin-top: 12px; }
+.nl-wrap input { flex: 1; padding: 8px 12px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); }
+.nl-wrap button, .btn { font-size: 13px; padding: 8px 14px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); white-space: nowrap; }
+.btn:hover { background: var(--color-background-secondary); }
+.nl-result { margin-top: 10px; padding: 10px 12px; background: var(--color-background-secondary); border-radius: var(--border-radius-md); font-size: 13px; color: var(--color-text-primary); display: none; }
+
+/* ── HITL items ──────────────────────────────────────────────────── */
+.hitl-item { padding: 10px 12px; border: 0.5px solid var(--color-border-warning); border-radius: var(--border-radius-md); background: var(--color-background-warning); margin-bottom: 8px; }
+.hitl-item.resolved { opacity: 0.4; pointer-events: none; }
+.hitl-q { font-size: 13px; color: var(--color-text-primary); margin-bottom: 8px; }
+.hitl-meta { font-size: 11px; color: var(--color-text-secondary); margin-bottom: 8px; }
+.hitl-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.hitl-actions input { flex: 1; font-size: 12px; padding: 5px 8px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); min-width: 0; }
+.hitl-actions button { font-size: 12px; padding: 5px 12px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); white-space: nowrap; }
+
+/* ── Message-commit map ──────────────────────────────────────────── */
+.filter-bar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+.filter-bar input { flex: 1; min-width: 160px; padding: 6px 10px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); }
+.filter-btn { font-size: 12px; padding: 5px 12px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-secondary); white-space: nowrap; }
+.filter-btn.active { background: var(--color-text-primary); color: var(--color-background-primary); border-color: var(--color-text-primary); }
+.msg-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 9px 0; border-bottom: 0.5px solid var(--color-border-tertiary); font-size: 12px; align-items: start; }
+.msg-row:last-child { border-bottom: none; }
+.raw-msg { font-family: var(--font-mono); font-size: 11px; background: var(--color-background-secondary); padding: 5px 8px; border-radius: var(--border-radius-md); color: var(--color-text-primary); white-space: pre-wrap; word-break: break-word; }
+.msg-meta { font-size: 11px; color: var(--color-text-secondary); margin-top: 4px; }
+.parsed-fields { display: flex; flex-direction: column; gap: 4px; }
+.field-row { display: flex; justify-content: space-between; font-size: 11px; }
+.field-key { color: var(--color-text-secondary); }
+.field-val { color: var(--color-text-primary); font-weight: 500; }
+.commit-status { display: flex; align-items: center; gap: 6px; margin-top: 5px; flex-wrap: wrap; }
+.correct-btn { font-size: 11px; padding: 3px 9px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); }
+.conf-bar-wrap { height: 4px; background: var(--color-border-tertiary); border-radius: 2px; margin-top: 5px; width: 100%; }
+.conf-bar { height: 4px; border-radius: 2px; }
+.pagination { display: flex; align-items: center; gap: 8px; margin-top: 14px; justify-content: center; font-size: 12px; color: var(--color-text-secondary); }
+.page-btn { font-size: 12px; padding: 4px 10px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); }
+.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Correction slide-out ────────────────────────────────────────── */
+.slideout-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.2); z-index: 200; }
+.slideout-overlay.open { display: block; }
+.slideout-panel {
+  position: fixed; top: 0; right: -480px; width: 480px; height: 100vh;
+  background: var(--color-background-primary);
+  border-left: 0.5px solid var(--color-border-tertiary);
+  z-index: 201; display: flex; flex-direction: column;
+  transition: right .25s ease;
+  overflow: hidden;
+}
+.slideout-panel.open { right: 0; }
+.slideout-header { padding: 16px 20px; border-bottom: 0.5px solid var(--color-border-tertiary); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+.slideout-header h3 { font-size: 14px; font-weight: 500; }
+.slideout-close { font-size: 18px; background: none; border: none; color: var(--color-text-secondary); line-height: 1; padding: 2px 6px; }
+.slideout-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+.slideout-body section { margin-bottom: 20px; }
+.slideout-body h4 { font-size: 12px; font-weight: 500; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 10px; }
+.form-row { margin-bottom: 10px; }
+.form-row label { display: block; font-size: 11px; color: var(--color-text-secondary); margin-bottom: 4px; }
+.form-row input, .form-row select, .form-row textarea {
+  width: 100%; padding: 7px 10px;
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: var(--border-radius-md);
+  background: var(--color-background-primary);
+  color: var(--color-text-primary);
+  font-size: 13px;
+}
+.form-row textarea { resize: vertical; min-height: 60px; }
+.form-actions { display: flex; gap: 8px; padding-top: 4px; }
+.btn-primary { padding: 8px 16px; background: var(--color-text-primary); color: var(--color-background-primary); border: none; border-radius: var(--border-radius-md); font-size: 13px; }
+.btn-primary:hover { opacity: .9; }
+.correction-history table { font-size: 11px; }
+.correction-history th { font-size: 11px; }
+
+/* ── Admin tab ───────────────────────────────────────────────────── */
+.section-wide { grid-column: 1/-1; }
+.inline-input { padding: 4px 8px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); width: 100%; }
+.add-row td { padding: 10px 8px; }
+.add-row input { padding: 5px 8px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); }
+.save-alias-btn { font-size: 11px; padding: 3px 8px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); }
+
+/* ── Misc ────────────────────────────────────────────────────────── */
+.empty-state { text-align: center; padding: 24px; color: var(--color-text-secondary); font-size: 13px; }
+.loading-indicator { text-align: center; padding: 16px; color: var(--color-text-secondary); font-size: 12px; }
+.section-row.three { grid-template-columns: 1fr 1fr 1fr; }
+
+/* ── System health card ──────────────────────────────────────────── */
+.status-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 0.5px solid var(--color-border-tertiary); }
+.status-row:last-child { border-bottom: none; }
+.status-name { flex: 1; font-size: 13px; }
+.status-sub { font-size: 11px; color: var(--color-text-secondary); margin-left: 6px; font-family: var(--font-mono); }
+.status-label { font-size: 12px; font-weight: 500; }
+.status-sep { color: var(--color-border-primary); margin: 0 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ── Topbar ──────────────────────────────────────────────────────── -->
+<div class="topbar">
+  <span class="logo">Fleet tracker</span>
+  <span class="nav-tab active" id="tab-btn-dashboard" onclick="switchTab('dashboard',this)">Dashboard</span>
+  <span class="nav-tab" id="tab-btn-operator" onclick="switchTab('operator',this)">Operator<span class="badge" id="hitl-badge" style="display:none">0</span></span>
+  <span class="nav-tab" id="tab-btn-commits" onclick="switchTab('commits',this)">Commits</span>
+  <span class="nav-tab" id="tab-btn-admin" onclick="switchTab('admin',this)">Admin</span>
+  <div class="live">
+    <span class="pulse" id="ws-pulse"></span>
+    <span id="live-label">Connecting…</span>
+    <span class="status-sep">|</span>
+    <span class="dot gray" id="dot-llm" title="LLM: unknown"></span><span style="font-size:11px;margin-left:3px">LLM</span>
+    <span class="status-sep">·</span>
+    <span class="dot gray" id="dot-wa" title="WA Listener: unknown"></span><span style="font-size:11px;margin-left:3px">WA</span>
+    <span class="status-sep">·</span>
+    <span class="dot gray" id="dot-db" title="Database: unknown"></span><span style="font-size:11px;margin-left:3px">DB</span>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ DASHBOARD -->
+<div class="main active" id="tab-dashboard">
+
+  <!-- KPI tiles -->
+  <div class="kpi-grid" id="kpi-grid">
+    <div class="kpi">
+      <div class="kpi-label">In loading</div>
+      <div class="kpi-val" id="kpi-loading-count">–</div>
+      <div class="kpi-names" id="kpi-loading-names"><span class="dot green"></span>–</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">In unloading</div>
+      <div class="kpi-val" id="kpi-unloading-count">–</div>
+      <div class="kpi-names" id="kpi-unloading-names"><span class="dot amber"></span>–</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">In transit</div>
+      <div class="kpi-val" id="kpi-transit-count">–</div>
+      <div class="kpi-names" id="kpi-transit-names"><span class="dot gray"></span>–</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Loaded &amp; left field today</div>
+      <div class="kpi-val" id="kpi-loaded-count">–</div>
+      <div class="kpi-sub" id="kpi-loaded-sub"></div>
+    </div>
+  </div>
+
+  <div class="section-row">
+    <!-- Site analytics -->
+    <div class="card">
+      <div class="card-title">Site analytics</div>
+      <div id="site-summary-body"><div class="loading-indicator">Loading…</div></div>
+    </div>
+
+    <!-- Shift summary + report -->
+    <div class="card">
+      <div class="card-title">Shift summary</div>
+      <div class="shift-box" id="shift-box">
+        <div>
+          <div style="font-size:12px;color:var(--color-text-secondary)">Current shift</div>
+          <div style="font-size:14px;font-weight:500" id="shift-name">–</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:12px;color:var(--color-text-secondary)">Messages</div>
+          <div style="font-size:14px;font-weight:500" id="shift-msg-count">–</div>
+        </div>
+      </div>
+      <div class="total-box" id="shift-history-pills"></div>
+      <div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:14px">Shift auto-detected from time + WA signals</div>
+
+      <!-- ── Shift report panel ── -->
+      <div style="border-top:0.5px solid var(--color-border-secondary);padding-top:14px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <span style="font-size:12px;font-weight:600;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:.04em" id="shift-report-name">Report</span>
+          <span style="flex:1"></span>
+          <button class="save-alias-btn" style="font-size:11px;padding:3px 10px" onclick="refreshShiftReport()">↺ Refresh</button>
+          <button class="btn-primary" id="copy-summary-btn" style="font-size:11px;padding:3px 14px" onclick="copySummary()">Copy summary</button>
+        </div>
+
+        <!-- Stat tiles -->
+        <div id="shift-report-stats" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;margin-bottom:12px"></div>
+
+        <!-- Truck cycles -->
+        <div id="shift-truck-cycles" style="margin-bottom:12px"></div>
+
+        <!-- Copyable text -->
+        <textarea id="shift-summary-text" readonly
+          style="width:100%;box-sizing:border-box;min-height:120px;font-family:var(--font-mono);font-size:11px;padding:9px 11px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-secondary);color:var(--color-text-primary);resize:vertical;line-height:1.75"
+        ></textarea>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fleet state table -->
+  <div class="card">
+    <div class="card-title">All trolleys — current state</div>
+    <table>
+      <thead><tr>
+        <th style="width:70px">Trolley</th>
+        <th style="width:140px">Status</th>
+        <th>Site</th>
+        <th style="width:140px">Last update</th>
+        <th style="width:90px">Loaded today</th>
+      </tr></thead>
+      <tbody id="fleet-table-body">
+        <tr><td colspan="5" class="loading-indicator">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- System health -->
+  <div class="section-row">
+    <div class="card">
+      <div class="card-title">System health</div>
+      <div id="health-services"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Incidents</div>
+      <div id="incident-log"><span class="loading-indicator">Loading…</span></div>
+    </div>
+  </div>
+
+  <!-- NL query -->
+  <div class="card">
+    <div class="card-title">NL query</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <button class="correct-btn" onclick="setNL('How many trolleys are loaded today?')">How many trolleys loaded today?</button>
+      <button class="correct-btn" onclick="setNL('Which trolleys left Dairybagh in shift 1?')">Which trolleys left Dairybagh in shift 1?</button>
+      <button class="correct-btn" onclick="setNL('What is the current status of trolley D?')">Status of trolley D?</button>
+    </div>
+    <div class="nl-wrap">
+      <input type="text" id="nl-input" placeholder="Ask anything about the fleet…" onkeydown="if(event.key==='Enter')runNL()"/>
+      <button class="btn" onclick="runNL()">Ask ↗</button>
+    </div>
+    <div class="nl-result" id="nl-result"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ OPERATOR -->
+<div class="main" id="tab-operator">
+
+  <!-- Manual message injection -->
+  <div class="card" id="inject-card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>Inject message manually</span>
+      <span id="inject-llm-badge" style="font-size:11px;font-weight:400;color:var(--color-text-secondary)">–</span>
+    </div>
+    <div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:10px">
+      Type a raw fleet message exactly as it would appear in WhatsApp. It runs through the full pipeline.
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <button class="filter-btn" onclick="setInjectText('B LS dairy')">B LS dairy</button>
+      <button class="filter-btn" onclick="setInjectText('D enter SoC')">D enter SoC</button>
+      <button class="filter-btn" onclick="setInjectText('R UO bg')">R UO bg</button>
+      <button class="filter-btn" onclick="setInjectText('P left')">P left</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:flex-start">
+      <input type="text" id="inject-text" placeholder="e.g.  B LS dairy  or  D enter SoC"
+             style="flex:1;padding:8px 12px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-family:var(--font-mono);font-size:13px"
+             onkeydown="if(event.key==='Enter')sendManualMessage()"/>
+      <input type="text" id="inject-sender" placeholder="Sender name (optional)"
+             style="width:160px;padding:8px 12px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px"/>
+      <button class="btn-primary" id="inject-btn" onclick="sendManualMessage()" style="padding:8px 18px;white-space:nowrap">Send ↗</button>
+    </div>
+    <div id="inject-result" style="margin-top:10px;padding:9px 12px;border-radius:var(--border-radius-md);font-size:12px;display:none"></div>
+  </div>
+
+  <!-- Shift control -->
+  <div class="card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>Shift control</span>
+      <span id="shift-ctrl-name" style="font-size:12px;font-weight:400;color:var(--color-text-secondary)">–</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button class="btn" onclick="shiftAction('start')" id="shift-btn-start">▶ Start shift</button>
+      <button class="btn" onclick="shiftAction('end')"   id="shift-btn-end">■ End shift</button>
+      <button class="btn" onclick="shiftAction('resume')" id="shift-btn-resume">↩ Resume last</button>
+    </div>
+    <div id="shift-ctrl-msg" style="margin-top:8px;font-size:12px;color:var(--color-text-secondary)"></div>
+  </div>
+
+  <!-- HITL queue -->
+  <div class="card" id="hitl-card">
+    <div class="card-title" id="hitl-card-title">HITL queue</div>
+    <div id="hitl-queue-body"><div class="loading-indicator">Loading…</div></div>
+  </div>
+
+  <!-- Message-to-commit map -->
+  <div class="card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>Message-to-commit map</span>
+      <button class="btn" onclick="triggerReprocess()" id="reprocess-btn" style="display:none;font-size:11px;padding:4px 10px">↺ Reprocess held</button>
+    </div>
+    <div id="reprocess-banner" class="reprocess-banner"></div>
+
+    <div class="filter-bar">
+      <button class="filter-btn active" onclick="setMsgFilter('all',this)">All</button>
+      <button class="filter-btn" onclick="setMsgFilter('committed',this)">Committed</button>
+      <button class="filter-btn" onclick="setMsgFilter('flagged',this)">Flagged</button>
+      <button class="filter-btn" onclick="setMsgFilter('held',this)">Held</button>
+      <button class="filter-btn" onclick="setMsgFilter('corrected',this)">Corrected</button>
+      <button class="filter-btn" id="noise-toggle-btn" onclick="toggleHideNoise(this)" style="margin-left:4px">Show noise</button>
+      <input type="text" id="msg-search" placeholder="Search trolley, site, message…" oninput="debounceMsgSearch(this.value)"/>
+    </div>
+
+    <!-- Column headers -->
+    <div class="msg-row" style="font-weight:500;font-size:11px;color:var(--color-text-secondary);padding-bottom:4px;border-bottom:none">
+      <div>Raw WA message</div>
+      <div>Parsed commit</div>
+    </div>
+
+    <div id="msg-map-body"><div class="loading-indicator">Loading…</div></div>
+
+    <div class="pagination" id="msg-pagination" style="display:none">
+      <button class="page-btn" id="pg-prev" onclick="changePage(-1)">← Prev</button>
+      <span id="pg-info">Page 1 of 1</span>
+      <button class="page-btn" id="pg-next" onclick="changePage(1)">Next →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ COMMITS -->
+<div class="main" id="tab-commits">
+  <div class="card">
+    <!-- Filter bar -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+      <input type="text" id="cl-search" placeholder="Search message, truck, site, reason…"
+             style="flex:1;min-width:180px;padding:6px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px"
+             oninput="debounceCommitSearch(this.value)"/>
+      <select id="cl-truck" onchange="loadCommits()" style="padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+        <option value="">All trucks</option>
+      </select>
+      <select id="cl-site" onchange="loadCommits()" style="padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+        <option value="">All sites</option>
+      </select>
+      <select id="cl-status" onchange="loadCommits()" style="padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+        <option value="">All statuses</option>
+        <option value="ENTER">Arrived</option>
+        <option value="LS">Loading started</option>
+        <option value="LO">Loading over</option>
+        <option value="LEFT">Left site</option>
+        <option value="US">Unloading started</option>
+        <option value="UO">Unloading over</option>
+      </select>
+      <select id="cl-commit-status" onchange="loadCommits()" style="padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+        <option value="">All states</option>
+        <option value="COMMITTED">Committed</option>
+        <option value="FLAGGED">Flagged</option>
+        <option value="HELD">Held</option>
+      </select>
+      <span id="cl-total" style="font-size:11px;color:var(--color-text-secondary);white-space:nowrap"></span>
+    </div>
+
+    <!-- Add commit button -->
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="btn-primary" style="font-size:12px;padding:5px 14px" onclick="openAddCommit()">+ Add commit</button>
+    </div>
+
+    <!-- Table -->
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th style="width:80px">Time</th>
+          <th style="width:55px">Truck</th>
+          <th style="width:110px">Status</th>
+          <th style="width:80px">Site</th>
+          <th style="width:55px">Conf</th>
+          <th style="width:75px">State</th>
+          <th style="width:130px">Source</th>
+          <th>Message · Reason</th>
+          <th style="width:80px;min-width:80px"></th>
+        </tr></thead>
+        <tbody id="cl-body"><tr><td colspan="9" class="loading-indicator">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <!-- Pagination -->
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px">
+      <button class="page-btn" id="cl-prev" onclick="changeCommitPage(-1)">← Prev</button>
+      <span id="cl-page-info" style="color:var(--color-text-secondary)"></span>
+      <button class="page-btn" id="cl-next" onclick="changeCommitPage(1)">Next →</button>
+    </div>
+  </div>
+
+  <!-- Add / Edit commit modal -->
+  <div id="commit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:999;align-items:center;justify-content:center">
+    <div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-primary);border-radius:var(--border-radius-lg);padding:24px;width:380px;max-width:95vw">
+      <h3 id="commit-modal-title" style="margin:0 0 16px;font-size:14px;font-weight:600">Add commit</h3>
+      <div style="display:grid;gap:10px">
+        <label style="font-size:12px;color:var(--color-text-secondary)">Truck
+          <select id="cm-truck" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--color-text-secondary)">Status
+          <select id="cm-status" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+            <option value="ENTER">ENTER – Arrived at site</option>
+            <option value="LS">LS – Loading started</option>
+            <option value="LO">LO – Loading over</option>
+            <option value="LEFT">LEFT – Left site</option>
+            <option value="US">US – Unloading started</option>
+            <option value="UO">UO – Unloading over</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--color-text-secondary)">Site
+          <select id="cm-site" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--color-text-secondary)">Timestamp (leave blank = now)
+          <input type="datetime-local" id="cm-ts" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px;box-sizing:border-box"/>
+        </label>
+        <label style="font-size:12px;color:var(--color-text-secondary)">Note (optional)
+          <input type="text" id="cm-note" placeholder="Reason or note…" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px;box-sizing:border-box"/>
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
+        <button class="btn-secondary" onclick="closeCommitModal()">Cancel</button>
+        <button class="btn-primary" id="cm-save-btn" onclick="saveCommitModal()">Save</button>
+      </div>
+      <div id="cm-error" style="display:none;margin-top:8px;font-size:11px;color:var(--color-status-held)"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ ADMIN -->
+<div class="main" id="tab-admin">
+  <div class="section-row">
+
+    <!-- Truck registry -->
+    <div class="card">
+      <div class="card-title">Truck registry</div>
+      <table>
+        <thead><tr><th style="width:50px">ID</th><th>Aliases</th><th style="width:60px">Active</th></tr></thead>
+        <tbody id="truck-registry-body"><tr><td colspan="3" class="loading-indicator">Loading…</td></tr></tbody>
+      </table>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <input type="text" id="new-truck-id" placeholder="ID (e.g. H)" style="width:80px;padding:6px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary)"/>
+        <input type="text" id="new-truck-name" placeholder="Display name" style="flex:1;padding:6px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary)"/>
+        <button class="correct-btn" onclick="addTruck()">+ Add truck</button>
+      </div>
+    </div>
+
+    <!-- Site registry -->
+    <div class="card">
+      <div class="card-title">Site registry</div>
+      <table>
+        <thead><tr><th style="width:60px">ID</th><th style="width:110px">Full name</th><th style="width:90px">Type</th><th>Aliases</th><th style="width:52px"></th></tr></thead>
+        <tbody id="site-registry-body"><tr><td colspan="5" class="loading-indicator">Loading…</td></tr></tbody>
+      </table>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <input type="text" id="new-site-id" placeholder="ID" style="width:70px;padding:6px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary)"/>
+        <input type="text" id="new-site-name" placeholder="Full name" style="flex:1;padding:6px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary)"/>
+        <select id="new-site-type" style="padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary)">
+          <option value="loading">Loading</option>
+          <option value="unloading">Unloading</option>
+          <option value="depot">Depot</option>
+        </select>
+        <button class="correct-btn" onclick="addSite()">+ Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shift config -->
+  <div class="card">
+    <div class="card-title">Shift configuration</div>
+    <table>
+      <thead><tr>
+        <th style="width:70px">Shift</th>
+        <th style="width:90px">Start time</th>
+        <th style="width:100px">Expected end</th>
+        <th style="width:130px">WA keyword</th>
+        <th>Last detected</th>
+        <th style="width:60px"></th>
+      </tr></thead>
+      <tbody id="shift-config-body"><tr><td colspan="6" class="loading-indicator">Loading…</td></tr></tbody>
+    </table>
+    <div style="margin-top:10px;font-size:12px;color:var(--color-text-secondary)">Shift boundaries auto-detected from time logic. WA keyword overrides when present.</div>
+  </div>
+
+</div>
+
+</div><!-- .app -->
+
+<!-- ── Correction slide-out ────────────────────────────────────────── -->
+<div class="slideout-overlay" id="slideout-overlay" onclick="closeCorrectPanel()"></div>
+<div class="slideout-panel" id="slideout-panel">
+  <div class="slideout-header">
+    <h3>Correct commit</h3>
+    <button class="slideout-close" onclick="closeCorrectPanel()">✕</button>
+  </div>
+  <div class="slideout-body">
+    <section>
+      <h4>Original message</h4>
+      <div class="raw-msg" id="so-raw-msg">–</div>
+    </section>
+    <section>
+      <h4>Original parsed values</h4>
+      <div id="so-original-fields" style="font-size:12px;color:var(--color-text-secondary)">–</div>
+    </section>
+    <section>
+      <h4>Correction</h4>
+      <div class="form-row">
+        <label>Field to correct</label>
+        <select id="so-field">
+          <option value="truck_id">Trolley ID</option>
+          <option value="status">Status</option>
+          <option value="site_id">Site</option>
+          <option value="shift_id">Shift</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Corrected value</label>
+        <input type="text" id="so-value" placeholder="Enter corrected value…"/>
+      </div>
+      <div class="form-row">
+        <label>Note (optional)</label>
+        <textarea id="so-note" placeholder="Reason for correction…"></textarea>
+      </div>
+      <div class="form-actions">
+        <button class="btn-primary" onclick="saveCorrection()">Save correction</button>
+        <button class="btn" onclick="closeCorrectPanel()">Cancel</button>
+      </div>
+      <div id="so-save-msg" style="margin-top:8px;font-size:12px;display:none"></div>
+    </section>
+    <section class="correction-history" id="so-history-section" style="display:none">
+      <h4>Correction history</h4>
+      <table>
+        <thead><tr><th>Field</th><th>From</th><th>To</th><th>By</th><th>When</th></tr></thead>
+        <tbody id="so-history-body"></tbody>
+      </table>
+    </section>
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────
+const S = {
+  wsConnected: false,
+  hitlCount: 0,
+  msgPage: 1,
+  msgFilter: 'all',
+  msgSearch: '',
+  msgHideNoise: false,
+  msgTotalPages: 1,
+  correctEventId: null,
+  searchDebounce: null,
+  trucks: [],   // loaded once for manual map dropdowns
+  sites: [],
+  pendingMessages: {},  // wa_message_id → {raw_text, sender, timestamp_iso}
+  llmWasOffline: false, // track LLM offline→online transition for reprocess prompt
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+const API = async (path, opts={}) => {
+  const r = await fetch(path, {headers:{'Content-Type':'application/json'},...opts});
+  if(!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
+};
+
+const fmtTime = iso => {
+  if(!iso) return '–';
+  try {
+    const d = new Date(iso);
+    const today = new Date();
+    const isToday = d.getFullYear()===today.getFullYear() && d.getMonth()===today.getMonth() && d.getDate()===today.getDate();
+    const time = d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false});
+    if(isToday) return time;
+    const dateStr = d.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
+    return `${dateStr} ${time}`;
+  } catch{ return iso.slice(0,16)||'–'; }
+};
+
+const fmtDate = iso => {
+  if(!iso) return '–';
+  try { return new Date(iso).toLocaleDateString('en-IN'); }
+  catch{ return iso.slice(0,10)||'–'; }
+};
+
+const statusLabel = s => ({
+  ENTER:'Arrived', LS:'Loading started', LO:'Loading over',
+  LEFT:'Left site', US:'Unloading started', UO:'Unloading over'
+})[s] || s || '–';
+
+const statusPillClass = s => ({
+  ENTER:'loading', LS:'loading', LO:'loading',
+  LEFT:'transit',
+  US:'unloading', UO:'unloading',
+})[s] || 'idle';
+
+const commitPillHtml = (status, conf) => {
+  const cls = {COMMITTED:'committed',FLAGGED:'flagged',HELD:'held',CORRECTED:'corrected'}[status] || 'idle';
+  const label = {COMMITTED:'Committed',FLAGGED:'Flagged',HELD:'Held',CORRECTED:'Corrected'}[status] || status;
+  return `<span class="pill ${cls}">${label}</span>`;
+};
+
+const confColor = c => c >= 0.85 ? '#3B6D11' : c >= 0.60 ? '#854F0B' : '#A32D2D';
+const confDotClass = c => c >= 0.85 ? 'green' : c >= 0.60 ? 'amber' : 'red';
+
+// ── WebSocket ─────────────────────────────────────────────────────────────
+let ws, wsRetry = 0;
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    S.wsConnected = true; wsRetry = 0;
+    document.getElementById('ws-pulse').classList.remove('disconnected');
+    document.getElementById('live-label').textContent = 'Live';
+  };
+
+  ws.onclose = () => {
+    S.wsConnected = false;
+    document.getElementById('ws-pulse').classList.add('disconnected');
+    document.getElementById('live-label').textContent = 'Reconnecting…';
+    const delay = Math.min(1000 * Math.pow(2, wsRetry++), 30000);
+    setTimeout(connectWS, delay);
+  };
+
+  ws.onmessage = e => {
+    try {
+      const {type, data} = JSON.parse(e.data);
+      handleWSEvent(type, data);
+    } catch{}
+  };
+}
+
+function handleWSEvent(type, data) {
+  if(type === 'fleet_state_updated') { refreshKPIs(); refreshSiteAnalytics(); refreshShiftReport(); }
+  if(type === 'commit_created') {
+    // Remove from pending (by ID for WA, by text for manual) and reload commit log
+    if(data.msg_id) removePending(data.msg_id);
+    if(data.raw_text) removePendingByText(data.raw_text);
+    refreshKPIs();
+    if(document.getElementById('tab-operator').classList.contains('active')) loadMessages();
+  }
+  if(type === 'message_received') {
+    // Show immediately in commit log with processing spinner
+    addPendingMessage(data);
+  }
+  if(type === 'commit_error') {
+    if(data.raw_text) removePendingByText(data.raw_text);
+    if(document.getElementById('tab-operator').classList.contains('active')) loadMessages();
+  }
+  if(type === 'reprocess_complete') {
+    refreshKPIs();
+    if(document.getElementById('tab-operator').classList.contains('active')) loadMessages();
+    showReprocessBanner(`Reprocessed ${data.count} held messages.`, 'success');
+  }
+  if(type === 'hitl_created')   refreshHITL();
+  if(type === 'hitl_resolved')  refreshHITL();
+  if(type === 'shift_changed')  refreshKPIs();
+}
+
+function addPendingMessage(data) {
+  const id = data.wa_message_id || data.raw_text;
+  S.pendingMessages[id] = data;
+  if(document.getElementById('tab-operator').classList.contains('active')) renderPending();
+}
+
+function removePending(msgId) {
+  delete S.pendingMessages[msgId];
+  const el = document.getElementById(`pending-${CSS.escape(msgId)}`);
+  if(el) el.remove();
+}
+
+function removePendingByText(rawText) {
+  for(const [k, v] of Object.entries(S.pendingMessages)) {
+    if(v.raw_text === rawText) { delete S.pendingMessages[k]; }
+  }
+  document.querySelectorAll('.pending-msg-row').forEach(el => {
+    if(el.dataset.rawText === rawText) el.remove();
+  });
+}
+
+function renderPending() {
+  const body = document.getElementById('msg-map-body');
+  if(!body) return;
+  // Remove stale pending rows
+  document.querySelectorAll('.pending-msg-row').forEach(el => el.remove());
+  // Prepend current pending entries
+  const entries = Object.values(S.pendingMessages);
+  if(!entries.length) return;
+  const frag = document.createDocumentFragment();
+  entries.reverse().forEach(m => {
+    const div = document.createElement('div');
+    div.className = 'msg-row pending-msg-row';
+    div.id = `pending-${m.wa_message_id || m.raw_text}`;
+    div.dataset.rawText = m.raw_text || '';
+    const srcLabel = m.source === 'manual' ? 'operator' : (m.sender || 'whatsapp');
+    div.innerHTML = `
+      <div>
+        <div class="raw-msg">${escHtml(m.raw_text||'')}</div>
+        <div class="msg-meta">${escHtml(srcLabel)} · ${fmtTime(m.timestamp_iso)}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="llm-status">
+          <span class="spinner"></span>
+          LLM processing
+          <span class="llm-dots"><span></span><span></span><span></span></span>
+        </span>
+      </div>`;
+    frag.appendChild(div);
+  });
+  body.insertBefore(frag, body.firstChild);
+}
+
+// Polling fallback — fast when WS is down, slow heartbeat when connected
+// This ensures the UI converges to correct state even if a WS event was missed
+// (network blip, tab backgrounded, missed broadcast, etc.)
+setInterval(() => { if(!S.wsConnected) { refreshKPIs(); refreshHITL(); } }, 5000);
+setInterval(() => { refreshKPIs(); refreshHITL(); }, 30_000);
+
+// ── KPI refresh ───────────────────────────────────────────────────────────
+async function refreshKPIs() {
+  try {
+    const d = await API('/fleet/kpis');
+    const k = d.kpis;
+
+    document.getElementById('kpi-loading-count').textContent = k.in_loading.count;
+    document.getElementById('kpi-loading-names').innerHTML = `<span class="dot green"></span>${k.in_loading.trucks.join(', ') || '–'}`;
+    document.getElementById('kpi-unloading-count').textContent = k.in_unloading.count;
+    document.getElementById('kpi-unloading-names').innerHTML = `<span class="dot amber"></span>${k.in_unloading.trucks.join(', ') || '–'}`;
+    document.getElementById('kpi-transit-count').textContent = k.in_transit.count;
+    document.getElementById('kpi-transit-names').innerHTML = `<span class="dot gray"></span>${k.in_transit.trucks.join(', ') || '–'}`;
+    document.getElementById('kpi-loaded-count').textContent = k.loaded_today.count;
+
+    // Site analytics — fetched separately so KPI stays fast
+    refreshSiteAnalytics();
+
+    // Shift summary
+    if(d.active_shift) {
+      const sh = d.active_shift;
+      const shLabel = sh.shift_name || `Shift ${sh.shift_number}`;
+      document.getElementById('shift-name').textContent = `${shLabel} · ${fmtTime(sh.started_at)} – now`;
+      document.getElementById('shift-msg-count').textContent = sh.message_count ?? sh.event_count ?? '–';
+      document.getElementById('live-label').textContent = `Live · ${shLabel}`;
+      // Update shift control card
+      const ctrlName = document.getElementById('shift-ctrl-name');
+      if(ctrlName) ctrlName.textContent = `Active: ${shLabel}`;
+    }
+
+    refreshFleetTable();
+  } catch(e) { console.warn('KPI refresh failed', e); }
+}
+
+async function refreshSiteAnalytics() {
+  const el = document.getElementById('site-summary-body');
+  try {
+    const d = await API('/analytics/site-state');
+    const sites = d.sites || [];
+    if (!sites.length) {
+      el.innerHTML = '<div class="empty-state">No site data yet</div>';
+      return;
+    }
+    el.innerHTML = sites.map(s => {
+      const isLoading = s.site_type === 'loading';
+      const inProgLabel  = isLoading ? 'Loading (LS)'        : 'Unloading (US)';
+      const opOverLabel  = isLoading ? 'Loaded, not left (LO)' : 'Unloaded, not left (UO)';
+      const totalOpLabel = isLoading ? 'Total loaded (LO)'   : 'Total unloaded (UO)';
+      const totalOp      = isLoading ? s.totals.total_lo     : s.totals.total_uo;
+
+      const stateRow = (label, trucks) => {
+        const hasT = trucks && trucks.length > 0;
+        return `<div class="site-state-row">
+          <span class="site-state-label">${label}</span>
+          <span class="site-state-trucks${hasT ? '' : ' empty'}">${hasT ? escHtml(trucks.join(', ')) : '–'}</span>
+        </div>`;
+      };
+
+      return `<div class="site-card">
+        <div class="site-card-header">
+          <span class="site-card-name">${escHtml(s.site_name)}</span>
+          <span class="site-type-badge">${s.site_type||'site'}</span>
+        </div>
+        <div class="site-panes">
+          <div class="site-pane">
+            <div class="site-pane-title">State</div>
+            ${stateRow('Entered', s.state.entered)}
+            ${stateRow(inProgLabel, s.state.in_progress)}
+            ${stateRow(opOverLabel, s.state.op_over)}
+          </div>
+          <div class="site-pane">
+            <div class="site-pane-title">Totals</div>
+            <div class="site-total-row">
+              <span class="site-state-label">${totalOpLabel}</span>
+              <span class="site-total-num">${totalOp}</span>
+            </div>
+            <div class="site-total-row">
+              <span class="site-state-label">Total left site</span>
+              <span class="site-total-num">${s.totals.total_left}</span>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = `<div class="empty-state">Error: ${e.message}</div>`; }
+}
+
+// ── Shift report ──────────────────────────────────────────────────────────
+async function refreshShiftReport() {
+  const btn = document.querySelector('[onclick="refreshShiftReport()"]');
+  if (btn) { btn.textContent = '↺ …'; btn.disabled = true; }
+  try {
+    const d = await API('/analytics/shift-summary');
+
+    document.getElementById('shift-report-name').textContent = d.shift_name ? `Report — ${d.shift_name}` : 'Report';
+
+    // Stat tiles
+    const stats = document.getElementById('shift-report-stats');
+    const tiles = [];
+
+    // Total loaded (all sites) — always shown first
+    tiles.push({ label: 'Total Loaded (all sites)', value: d.total_loaded ?? 0, color: '#27500A', bold: true });
+
+    // Per-site loading tiles
+    for (const [sid, info] of Object.entries(d.loaded_by_site || {})) {
+      tiles.push({ label: `  ↳ @${info.name}`, value: info.count, color: '#27500A' });
+    }
+
+    // Reached unloading site tiles
+    for (const [sid, info] of Object.entries(d.reached_by_site || {})) {
+      tiles.push({ label: `Reached @${info.name}`, value: info.count, color: '#0C447C' });
+    }
+    if (!Object.keys(d.reached_by_site || {}).length) {
+      tiles.push({ label: 'Reached unloading', value: 0, color: '#0C447C' });
+    }
+
+    // Unloaded site tiles
+    for (const [sid, info] of Object.entries(d.unloaded_by_site || {})) {
+      tiles.push({ label: `Unloaded @${info.name}`, value: info.count, color: '#5B1FA3' });
+    }
+    if (!Object.keys(d.unloaded_by_site || {}).length) {
+      tiles.push({ label: 'Unloaded', value: 0, color: '#5B1FA3' });
+    }
+
+    // In loading / unloading
+    const inLoadAliases = (d.in_loading || []).map(t => t.truck_alias || t.truck_id);
+    tiles.push({ label: 'In Loading now', value: inLoadAliases.length, sub: inLoadAliases.join(', ')||'–', color: '#92400e' });
+
+    if ((d.in_unloading||[]).length > 0) {
+      const inUnloadAliases = (d.in_unloading || []).map(t => t.truck_alias || t.truck_id);
+      tiles.push({ label: 'In Unloading now', value: inUnloadAliases.length, sub: inUnloadAliases.join(', '), color: '#92400e' });
+    }
+
+    stats.innerHTML = tiles.map(t => `
+      <div style="padding:10px 12px;border:0.5px solid ${t.bold ? t.color : 'var(--color-border-secondary)'};border-radius:var(--border-radius-md);background:var(--color-background-secondary)${t.bold ? ';outline:1px solid '+t.color+'33' : ''}">
+        <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:4px;font-weight:${t.bold?'700':'400'}">${t.label}</div>
+        <div style="font-size:${t.bold?'26':'22'}px;font-weight:700;color:${t.color}">${t.value}</div>
+        ${t.sub ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:2px">${escHtml(t.sub)}</div>` : ''}
+      </div>`).join('');
+
+    // Truck cycles table
+    const cyclesEl = document.getElementById('shift-truck-cycles');
+    if (d.truck_cycles && d.truck_cycles.length) {
+      const hasUnloads = d.truck_cycles.some(t => t.unloads > 0);
+      cyclesEl.innerHTML = `
+        <div style="font-size:11px;font-weight:600;color:var(--color-text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Load cycles per trolley</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          ${d.truck_cycles.map(t => `
+            <div style="display:flex;align-items:center;gap:6px;padding:4px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-secondary)">
+              <span style="font-weight:600;font-size:13px">${escHtml(t.alias)}</span>
+              <span style="font-size:11px;color:var(--color-text-secondary)">→</span>
+              <span style="font-size:13px;color:#27500A;font-weight:600">${t.loads} loads</span>
+              ${hasUnloads && t.unloads > 0 ? `<span style="font-size:11px;color:var(--color-text-secondary)">/</span><span style="font-size:12px;color:#5B1FA3">${t.unloads} unloads</span>` : ''}
+            </div>`).join('')}
+        </div>`;
+    } else {
+      cyclesEl.innerHTML = '';
+    }
+
+    // Copyable text
+    document.getElementById('shift-summary-text').value = d.text || '';
+
+  } catch(e) {
+    document.getElementById('shift-report-stats').innerHTML = `<div style="color:var(--color-status-held);font-size:12px">Error: ${e.message}</div>`;
+  } finally {
+    if (btn) { btn.textContent = '↺ Refresh'; btn.disabled = false; }
+  }
+}
+
+async function copySummary() {
+  const text = document.getElementById('shift-summary-text').value;
+  try {
+    await navigator.clipboard.writeText(text);
+    const btn = document.getElementById('copy-summary-btn');
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+  } catch(e) {
+    // Fallback: select the textarea
+    document.getElementById('shift-summary-text').select();
+    document.execCommand('copy');
+  }
+}
+
+async function refreshFleetTable() {
+  try {
+    const d = await API('/fleet/state');
+    const tbody = document.getElementById('fleet-table-body');
+    if(!d.trucks || !d.trucks.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No fleet data yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.trucks.map(t => {
+      const pillCls = statusPillClass(t.status);
+      const label = statusLabel(t.status);
+      return `<tr>
+        <td>${t.truck_id||'–'}</td>
+        <td><span class="pill ${pillCls}">${label}</span></td>
+        <td>${t.site_name||t.site_id||'—'}</td>
+        <td>${fmtTime(t.timestamp_effective)}</td>
+        <td>–</td>
+      </tr>`;
+    }).join('');
+  } catch(e) { console.warn('Fleet table refresh failed', e); }
+}
+
+async function refreshShiftHistory() {
+  try {
+    const d = await API('/api/shifts');
+    const pills = (d.shifts||[]).slice(0,5).map(sh =>
+      `<span class="total-pill">${sh.shift_name||('Shift '+sh.shift_number)}: ${sh.event_count} events</span>`
+    ).join('');
+    document.getElementById('shift-history-pills').innerHTML = pills || '<span class="total-pill">No shifts yet</span>';
+  } catch(e) {}
+}
+
+// ── HITL ──────────────────────────────────────────────────────────────────
+async function refreshHITL() {
+  try {
+    const d = await API('/hitl/queue');
+    S.hitlCount = d.count;
+    const badge = document.getElementById('hitl-badge');
+    if(d.count > 0) { badge.textContent = d.count; badge.style.display = 'inline-flex'; }
+    else { badge.style.display = 'none'; }
+
+    const title = document.getElementById('hitl-card-title');
+    title.textContent = `HITL queue — ${d.count} pending`;
+
+    const body = document.getElementById('hitl-queue-body');
+    if(!d.questions || !d.questions.length) {
+      body.innerHTML = '<div class="empty-state">No pending questions ✓</div>';
+      return;
+    }
+    const TYPE_LABEL = {
+      UNKNOWN_TRUCK: {label:'Unknown truck', color:'#7c2d12'},
+      UNKNOWN_SITE:  {label:'Unknown site',  color:'#92400e'},
+      LOW_CONFIDENCE:{label:'Low confidence',color:'#1e40af'},
+      CORRECTION_AMBIGUOUS:{label:'Ambiguous correction',color:'#5B1FA3'},
+    };
+    body.innerHTML = d.questions.map(q => {
+      const ctx = typeof q.context === 'object' ? q.context : {};
+      const conf = ctx.confidence ? Math.round(ctx.confidence*100)+'%' : '';
+      const tl = TYPE_LABEL[q.question_type] || {label: q.question_type, color:'#555'};
+      const rawMsg = ctx.raw_text || '';
+      const truck = ctx.truck_alias || ctx.truck_id || '';
+      // Build parsed summary line
+      const parsedSummary = ctx.parsed || '';
+      // Build hint based on type
+      let hint = '';
+      if (q.question_type === 'UNKNOWN_TRUCK') {
+        hint = 'Type a truck code (e.g. TA) or: new:TX:Display Name:alias';
+      } else if (q.question_type === 'UNKNOWN_SITE') {
+        hint = 'Type a site code (e.g. SOC), the corrected message (e.g. "D left SOC"), or: new:SID:Name:loading:alias';
+      } else if (q.question_type === 'LOW_CONFIDENCE') {
+        hint = `Type CONFIRM to accept${parsedSummary?' "'+parsedSummary+'"':''}, or type a correction`;
+      } else {
+        hint = 'Type the corrected message or clarification';
+      }
+      return `<div class="hitl-item" id="hitl-${q.question_id}">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:8px;background:${tl.color}22;color:${tl.color}">${tl.label}</span>
+          ${truck?`<span style="font-size:11px;color:var(--color-text-secondary)">Trolley: <b>${escHtml(truck)}</b></span>`:''}
+          ${conf?`<span style="font-size:11px;color:var(--color-text-secondary)">Conf: ${conf}</span>`:''}
+          <span style="font-size:11px;color:var(--color-text-secondary);margin-left:auto">${fmtTime(q.created_at)}</span>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:12px;padding:6px 8px;background:var(--color-background-secondary);border-radius:4px;margin-bottom:8px">"${escHtml(rawMsg)}"</div>
+        ${parsedSummary?`<div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:8px">Parsed as: ${escHtml(parsedSummary)}</div>`:''}
+        <div class="hitl-actions">
+          <input type="text" id="ans-${q.question_id}" placeholder="${escAttr(hint)}"/>
+          <button onclick="resolveHITL('${q.question_id}','answer')">Submit</button>
+          <button onclick="resolveHITL('${q.question_id}','skip')">Skip</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { console.warn('HITL refresh failed', e); }
+}
+
+async function resolveHITL(qid, action) {
+  const el = document.getElementById('hitl-'+qid);
+  if(action === 'answer') {
+    const ans = document.getElementById('ans-'+qid).value.trim();
+    if(!ans) { alert('Enter a correction first.'); return; }
+    try {
+      await API(`/hitl/${qid}/answer`, {method:'POST', body: JSON.stringify({question_id: qid, answer: ans})});
+    } catch(e) { console.warn('Answer failed', e); }
+  } else {
+    try { await API(`/hitl/${qid}/skip`, {method:'POST'}); } catch(e) {}
+  }
+  if(el) el.classList.add('resolved');
+  setTimeout(refreshHITL, 500);
+}
+
+// ── Message map ───────────────────────────────────────────────────────────
+async function loadMessages() {
+  document.getElementById('msg-map-body').innerHTML = '<div class="loading-indicator">Loading…</div>';
+  try {
+    const params = new URLSearchParams({page: S.msgPage, limit: 20, status: S.msgFilter, search: S.msgSearch, hide_noise: S.msgHideNoise ? 'true' : 'false'});
+    const d = await API(`/api/messages?${params}`);
+
+    S.msgTotalPages = d.pages || 1;
+    updatePagination(d.page, d.pages, d.total);
+
+    if(!d.items || !d.items.length) {
+      document.getElementById('msg-map-body').innerHTML = '<div class="empty-state">No messages found</div>';
+      return;
+    }
+
+    document.getElementById('msg-map-body').innerHTML = '';
+    document.getElementById('msg-map-body').innerHTML = d.items.map(item => {
+      const conf = item.confidence;
+      const barW = conf ? Math.round(conf*100) : 0;
+      const barColor = conf ? confColor(conf) : '#aaa';
+      const dotCls = conf ? confDotClass(conf) : 'gray';
+      const statusStr = item.commit_status;
+      const isNoise = statusStr === 'NOISE';
+      const isUnmapped = item.event_id && statusStr === 'HELD' && !item.truck_id;
+      const correctBtn = item.event_id ? `<button class="correct-btn" onclick='openCorrectPanel(${JSON.stringify({event_id:item.event_id,raw:item.raw_text,truck:item.truck_alias||item.truck_id,status:item.status,site:item.site_alias||item.site_id,shift:item.shift_id})})'>Correct</button>` : '';
+      const commitBtn = (statusStr==='FLAGGED'||statusStr==='HELD') && item.truck_id ? `<button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none" onclick="forceCommit('${item.event_id}')">Commit</button>` : '';
+      const reasoningHtml = item.reasoning ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:4px;line-height:1.4;max-width:280px">${escHtml(item.reasoning)}</div>` : '';
+
+      let rightHtml = '';
+      if(isNoise) {
+        // LLM classified as non-fleet message — show classification details
+        rightHtml = `
+          <div class="commit-status">
+            <span class="dot gray"></span>
+            <span style="font-size:11px;color:var(--color-text-secondary)">${item.status||'NOISE'}${conf?' · conf '+conf.toFixed(2):''}</span>
+          </div>
+          ${reasoningHtml}`;
+      } else if(isUnmapped) {
+        // LLM failed or couldn't identify truck — show manual map form
+        rightHtml = `
+          <div style="font-size:11px;color:var(--color-text-danger);font-weight:500;margin-bottom:8px">
+            ⚠ Not mapped — LLM was offline
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:6px">
+            <select id="map-truck-${item.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+              <option value="">Trolley…</option>
+              ${(S.trucks||[]).map(t=>`<option value="${escAttr(t.truck_id)}">${escHtml(t.display_name||t.truck_id)}</option>`).join('')}
+            </select>
+            <select id="map-status-${item.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+              <option value="">Status…</option>
+              <option value="ENTER">Arrived</option>
+              <option value="LS">Loading started</option>
+              <option value="LO">Loading over</option>
+              <option value="LEFT">Left site</option>
+              <option value="US">Unloading started</option>
+              <option value="UO">Unloading over</option>
+            </select>
+            <select id="map-site-${item.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+              <option value="">Site…</option>
+              ${(S.sites||[]).map(s=>`<option value="${escAttr(s.site_id)}">${escHtml(s.display_name||s.site_id)}</option>`).join('')}
+            </select>
+          </div>
+          <button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none;padding:4px 12px" onclick="submitMap('${item.event_id}')">Commit manually</button>
+          <span id="map-msg-${item.event_id}" style="font-size:11px;margin-left:8px;color:var(--color-text-secondary)"></span>`;
+      } else if(item.event_id) {
+        rightHtml = `
+          <div class="parsed-fields">
+            <div class="field-row"><span class="field-key">Trolley</span><span class="field-val">${item.truck_alias||item.truck_id||'?'}</span></div>
+            <div class="field-row"><span class="field-key">Status</span><span class="field-val">${statusLabel(item.status)}</span></div>
+            <div class="field-row"><span class="field-key">Site</span><span class="field-val">${item.site_name||item.site_alias||item.site_id||'–'}</span></div>
+          </div>
+          <div class="commit-status">
+            <span class="dot ${dotCls}"></span>
+            <span style="font-size:11px;color:var(--color-text-secondary)">${statusStr||'–'}${conf?' · conf '+conf.toFixed(2):''}</span>
+            ${commitBtn} ${correctBtn}
+          </div>
+          ${reasoningHtml}
+          <div class="conf-bar-wrap"><div class="conf-bar" style="width:${barW}%;background:${barColor}"></div></div>`;
+      } else {
+        rightHtml = `<div style="font-size:11px;color:var(--color-text-secondary)">No commit — ${statusStr||'unparsed'}</div>`;
+      }
+      return `<div class="msg-row" id="msg-row-${item.event_id||''}">
+        <div>
+          <div class="raw-msg">${escHtml(item.raw_text||'')}</div>
+          <div class="msg-meta">${item.sender_name||item.sender_id||''} · ${fmtTime(item.timestamp_iso)}</div>
+        </div>
+        <div>${rightHtml}</div>
+      </div>`;
+    }).join('');
+    // Prepend any currently-processing messages above DB results
+    renderPending();
+  } catch(e) {
+    document.getElementById('msg-map-body').innerHTML = `<div class="empty-state">Error loading messages: ${e.message}</div>`;
+  }
+}
+
+function setMsgFilter(f, btn) {
+  S.msgFilter = f; S.msgPage = 1;
+  // Only toggle active on the status filter buttons (not the noise toggle)
+  document.querySelectorAll('.filter-btn:not(#noise-toggle-btn)').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  loadMessages();
+}
+
+function toggleHideNoise(btn) {
+  S.msgHideNoise = !S.msgHideNoise;
+  btn.textContent = S.msgHideNoise ? 'Show noise ✓' : 'Show noise';
+  btn.classList.toggle('active', S.msgHideNoise);
+  S.msgPage = 1;
+  loadMessages();
+}
+
+function debounceMsgSearch(val) {
+  clearTimeout(S.searchDebounce);
+  S.searchDebounce = setTimeout(() => { S.msgSearch = val; S.msgPage = 1; loadMessages(); }, 350);
+}
+
+function changePage(delta) {
+  const next = S.msgPage + delta;
+  if(next < 1 || next > S.msgTotalPages) return;
+  S.msgPage = next;
+  loadMessages();
+}
+
+function updatePagination(page, pages, total) {
+  const pg = document.getElementById('msg-pagination');
+  pg.style.display = pages > 1 ? 'flex' : 'none';
+  document.getElementById('pg-info').textContent = `Page ${page} of ${pages} (${total} total)`;
+  document.getElementById('pg-prev').disabled = page <= 1;
+  document.getElementById('pg-next').disabled = page >= pages;
+}
+
+// ── Correction panel ──────────────────────────────────────────────────────
+async function forceCommit(eventId) {
+  try {
+    await API(`/api/events/${eventId}/force-commit`, {method:'POST'});
+    loadMessages();
+    refreshKPIs();
+  } catch(e) { alert(`Commit failed: ${e.message}`); }
+}
+
+function openCorrectPanel(info) {
+  S.correctEventId = info.event_id;
+  document.getElementById('so-raw-msg').textContent = info.raw || '–';
+  document.getElementById('so-original-fields').innerHTML =
+    `Trolley: <strong>${info.truck||'–'}</strong> · Status: <strong>${statusLabel(info.status)}</strong> · Site: <strong>${info.site||'–'}</strong>`;
+  document.getElementById('so-value').value = '';
+  document.getElementById('so-note').value = '';
+  document.getElementById('so-save-msg').style.display = 'none';
+
+  // Load correction history
+  loadCorrectionHistory(info.event_id);
+
+  document.getElementById('slideout-overlay').classList.add('open');
+  document.getElementById('slideout-panel').classList.add('open');
+}
+
+function closeCorrectPanel() {
+  document.getElementById('slideout-overlay').classList.remove('open');
+  document.getElementById('slideout-panel').classList.remove('open');
+  S.correctEventId = null;
+}
+
+async function loadCorrectionHistory(eventId) {
+  try {
+    const d = await API(`/api/commits/${eventId}/corrections`);
+    const hist = document.getElementById('so-history-section');
+    const tbody = document.getElementById('so-history-body');
+    if(!d.corrections || !d.corrections.length) { hist.style.display = 'none'; return; }
+    hist.style.display = 'block';
+    tbody.innerHTML = d.corrections.map(c =>
+      `<tr><td>${c.field_changed}</td><td>${c.original_value||'–'}</td><td>${c.corrected_value||'–'}</td><td>${c.corrected_by||'–'}</td><td>${fmtDate(c.corrected_at)}</td></tr>`
+    ).join('');
+  } catch{}
+}
+
+async function saveCorrection() {
+  if(!S.correctEventId) return;
+  const field = document.getElementById('so-field').value;
+  const val = document.getElementById('so-value').value.trim();
+  const note = document.getElementById('so-note').value.trim();
+  const msg = document.getElementById('so-save-msg');
+  if(!val) { msg.style.display='block'; msg.textContent='Enter a corrected value.'; msg.style.color='var(--color-text-danger)'; return; }
+
+  try {
+    await API(`/api/commits/${S.correctEventId}/correct`, {
+      method: 'POST',
+      body: JSON.stringify({field, corrected_value: val, note: note||null})
+    });
+    msg.style.display='block'; msg.textContent='Correction saved ✓'; msg.style.color='#27500A';
+    setTimeout(() => { closeCorrectPanel(); loadMessages(); }, 900);
+  } catch(e) {
+    msg.style.display='block'; msg.textContent=`Error: ${e.message}`; msg.style.color='var(--color-text-danger)';
+  }
+}
+
+// ── Admin — registry tables ───────────────────────────────────────────────
+async function loadTruckRegistry() {
+  try {
+    const d = await API('/api/registry/trucks');
+    const tbody = document.getElementById('truck-registry-body');
+    if(!d.trucks || !d.trucks.length) { tbody.innerHTML = '<tr><td colspan="3" class="empty-state">No trucks</td></tr>'; return; }
+    tbody.innerHTML = d.trucks.map(t => {
+      const aliases = Array.isArray(t.aliases) ? t.aliases.join(', ') : t.aliases||'';
+      return `<tr>
+        <td>${t.truck_id}</td>
+        <td>
+          <input class="inline-input" id="ta-${t.truck_id}" value="${escAttr(aliases)}" style="width:calc(100% - 70px)"/>
+          <button class="save-alias-btn" onclick="saveTruckAliases('${t.truck_id}')">Save</button>
+        </td>
+        <td><span class="dot ${t.is_active?'green':'gray'}"></span>${t.is_active?'Yes':'No'}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function saveTruckAliases(truckId) {
+  const raw = document.getElementById(`ta-${truckId}`).value;
+  const aliases = raw.split(',').map(s=>s.trim()).filter(Boolean);
+  try {
+    await API(`/api/registry/trucks/${truckId}`, {method:'PUT', body: JSON.stringify({aliases})});
+  } catch(e) { alert('Save failed: '+e.message); }
+}
+
+async function addTruck() {
+  const tid = document.getElementById('new-truck-id').value.trim();
+  const name = document.getElementById('new-truck-name').value.trim() || tid;
+  if(!tid) { alert('Enter a truck ID.'); return; }
+  try {
+    await API('/api/registry/trucks', {method:'POST', body: JSON.stringify({truck_id:tid, display_name:name, aliases:[tid.toLowerCase()]})});
+    document.getElementById('new-truck-id').value='';
+    document.getElementById('new-truck-name').value='';
+    loadTruckRegistry();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function loadSiteRegistry() {
+  try {
+    const d = await API('/api/registry/sites');
+    const tbody = document.getElementById('site-registry-body');
+    if(!d.sites || !d.sites.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No sites</td></tr>'; return; }
+    tbody.innerHTML = d.sites.map(s => {
+      const aliases = Array.isArray(s.aliases) ? s.aliases.join(', ') : s.aliases||'';
+      const typeOpts = ['loading','unloading','depot'].map(v =>
+        `<option value="${v}"${s.site_type===v?' selected':''}>${v.charAt(0).toUpperCase()+v.slice(1)}</option>`
+      ).join('');
+      return `<tr>
+        <td>${escHtml(s.site_id)}</td>
+        <td><input class="inline-input" id="sn-${s.site_id}" value="${escAttr(s.display_name||s.site_id)}" style="width:100%"/></td>
+        <td><select class="inline-input" id="st-${s.site_id}" style="width:100%;padding:3px 4px">${typeOpts}</select></td>
+        <td><input class="inline-input" id="sa-${s.site_id}" value="${escAttr(aliases)}" style="width:100%"/></td>
+        <td><button class="save-alias-btn" onclick="saveSiteRow('${escAttr(s.site_id)}')">Save</button></td>
+      </tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function saveSiteRow(siteId) {
+  const name    = document.getElementById(`sn-${siteId}`)?.value.trim();
+  const type    = document.getElementById(`st-${siteId}`)?.value;
+  const raw     = document.getElementById(`sa-${siteId}`)?.value || '';
+  const aliases = raw.split(',').map(s=>s.trim()).filter(Boolean);
+  try {
+    await API(`/api/registry/sites/${encodeURIComponent(siteId)}`, {
+      method:'PUT',
+      body: JSON.stringify({display_name:name, site_type:type, aliases}),
+    });
+    // refresh global cache
+    const d = await API('/api/registry/sites');
+    S.sites = d.sites || [];
+  } catch(e) { alert('Save failed: '+e.message); }
+}
+
+async function addSite() {
+  const sid = document.getElementById('new-site-id').value.trim();
+  const name = document.getElementById('new-site-name').value.trim();
+  const type = document.getElementById('new-site-type').value;
+  if(!sid||!name) { alert('Enter site ID and name.'); return; }
+  try {
+    await API('/api/registry/sites', {method:'POST', body: JSON.stringify({site_id:sid, display_name:name, site_type:type, aliases:[sid.toLowerCase()]})});
+    document.getElementById('new-site-id').value='';
+    document.getElementById('new-site-name').value='';
+    loadSiteRegistry();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function loadShiftConfig() {
+  try {
+    const d = await API('/api/registry/shifts-config');
+    const tbody = document.getElementById('shift-config-body');
+    if(!d.shift_config || !d.shift_config.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No config</td></tr>'; return; }
+    tbody.innerHTML = d.shift_config.map(sc => {
+      return `<tr>
+        <td>Shift ${sc.shift_number}</td>
+        <td><input class="inline-input" id="sc-start-${sc.shift_number}" value="${escAttr(sc.start_time||'')}"/></td>
+        <td>${sc.expected_end||'–'}</td>
+        <td><input class="inline-input" id="sc-kw-${sc.shift_number}" value="${escAttr(sc.wa_keyword||'')}"/></td>
+        <td>${sc.last_detected ? fmtDate(sc.last_detected)+' '+fmtTime(sc.last_detected) : '–'}</td>
+        <td><button class="save-alias-btn" onclick="saveShiftConfig(${sc.shift_number})">Save</button></td>
+      </tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function saveShiftConfig(num) {
+  const start = document.getElementById(`sc-start-${num}`).value.trim();
+  const kw = document.getElementById(`sc-kw-${num}`).value.trim();
+  try {
+    await API(`/api/registry/shifts-config/${num}`, {method:'PUT', body: JSON.stringify({start_time:start, wa_keyword:kw||null})});
+  } catch(e) { alert('Save failed: '+e.message); }
+}
+
+// ── NL query ──────────────────────────────────────────────────────────────
+function setNL(q) { document.getElementById('nl-input').value = q; }
+
+async function runNL() {
+  const q = document.getElementById('nl-input').value.trim();
+  const el = document.getElementById('nl-result');
+  if(!q) return;
+  el.style.display = 'block';
+  el.textContent = 'Querying…';
+  try {
+    const d = await API('/api/query/nl', {method:'POST', body: JSON.stringify({question: q})});
+    el.textContent = d.answer || d.result || JSON.stringify(d);
+  } catch(e) { el.textContent = 'Error: '+e.message; }
+}
+
+// ── Commits log ───────────────────────────────────────────────────────────
+const CL = { page: 1, totalPages: 1, search: '', searchTimer: null };
+
+const SOURCE_COLORS = {
+  'LLM auto':           '#27500A',
+  'LLM inferred · auto':'#27500A',
+  'LLM flagged':        '#92400e',
+  'LLM held':           '#991b1b',
+  'Human confirmed':    '#0C447C',
+  'Manual map':         '#0C447C',
+  'Manual entry':       '#0C447C',
+  'LLM parsed · corrected': '#5B1FA3',
+};
+
+function debounceCommitSearch(val) {
+  clearTimeout(CL.searchTimer);
+  CL.searchTimer = setTimeout(() => { CL.search = val; CL.page = 1; loadCommits(); }, 350);
+}
+
+async function loadCommits() {
+  const tbody = document.getElementById('cl-body');
+  tbody.innerHTML = '<tr><td colspan="9" class="loading-indicator">Loading…</td></tr>';
+  try {
+    const params = new URLSearchParams({
+      page: CL.page, limit: 50,
+      search: CL.search,
+      truck_id:      document.getElementById('cl-truck').value,
+      site_id:       document.getElementById('cl-site').value,
+      status:        document.getElementById('cl-status').value,
+      commit_status: document.getElementById('cl-commit-status').value,
+    });
+    const d = await API(`/api/commits-log?${params}`);
+    CL.totalPages = d.pages || 1;
+    document.getElementById('cl-total').textContent = `${d.total} events`;
+    document.getElementById('cl-page-info').textContent = `Page ${d.page} of ${d.pages}`;
+    document.getElementById('cl-prev').disabled = d.page <= 1;
+    document.getElementById('cl-next').disabled = d.page >= d.pages;
+
+    if (!d.items || !d.items.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No commits found</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = d.items.map(ev => {
+      const conf = ev.confidence;
+      const barW = conf ? Math.round(conf * 100) : 0;
+      const barColor = conf ? confColor(conf) : '#ccc';
+      const dotCls = ev.commit_status === 'COMMITTED' ? (conf ? confDotClass(conf) : 'green')
+                   : ev.commit_status === 'FLAGGED'   ? 'amber' : 'red';
+      const srcColor = SOURCE_COLORS[ev.commit_source] || 'var(--color-text-secondary)';
+      const infTag = ev.inferred ? `<span style="font-size:9px;padding:1px 4px;border-radius:8px;background:#F5F0FF;color:#5B1FA3;margin-left:4px">inferred</span>` : '';
+      const reason = ev.reasoning ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:2px">${escHtml(ev.reasoning)}</div>` : '';
+      const msg = ev.raw_text ? `<div style="font-size:11px;font-family:var(--font-mono)">${escHtml(ev.raw_text)}</div>${reason}` : reason || '–';
+      const eid = escAttr(ev.event_id);
+      const actions = `<div style="display:flex;gap:4px">
+        <button class="save-alias-btn" style="font-size:10px;padding:2px 7px" onclick="openEditCommit('${eid}')">Edit</button>
+        <button class="save-alias-btn" style="font-size:10px;padding:2px 7px;color:var(--color-status-held)" onclick="deleteCommit('${eid}')">Del</button>
+      </div>`;
+      return `<tr>
+        <td style="font-size:11px;color:var(--color-text-secondary)">${fmtTime(ev.timestamp_effective)}</td>
+        <td style="font-weight:500">${escHtml(shortTruck(ev.truck_alias, ev.truck_id))}</td>
+        <td><span class="pill ${statusPillClass(ev.status)}">${statusLabel(ev.status)}</span>${infTag}</td>
+        <td style="font-size:12px">${escHtml(ev.site_name||ev.site_alias||ev.site_id||'–')}</td>
+        <td>
+          <div style="font-size:11px;color:var(--color-text-secondary)">${conf ? conf.toFixed(2) : '–'}</div>
+          <div style="height:3px;background:var(--color-border-tertiary);border-radius:2px;margin-top:3px">
+            <div style="height:3px;width:${barW}%;background:${barColor};border-radius:2px"></div>
+          </div>
+        </td>
+        <td><span class="dot ${dotCls}" style="margin-right:4px"></span><span style="font-size:11px">${ev.commit_status}</span></td>
+        <td style="font-size:11px;color:${srcColor};font-weight:500">${escHtml(ev.commit_source)}</td>
+        <td>${msg}</td>
+        <td>${actions}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('cl-body').innerHTML = `<tr><td colspan="9" class="empty-state">Error: ${e.message}</td></tr>`;
+  }
+}
+
+// ── Commit modal (add / edit) ─────────────────────────────────────────────
+const CM = { mode: 'add', eventId: null };
+
+function _populateModalSelects() {
+  const tSel = document.getElementById('cm-truck');
+  const sSel = document.getElementById('cm-site');
+  if (tSel.options.length === 0) {
+    (S.trucks||[]).forEach(t => tSel.add(new Option(t.display_name||t.truck_id, t.truck_id)));
+  }
+  if (sSel.options.length === 0) {
+    (S.sites||[]).forEach(s => sSel.add(new Option(s.display_name||s.site_id, s.site_id)));
+  }
+}
+
+function openAddCommit() {
+  CM.mode = 'add'; CM.eventId = null;
+  document.getElementById('commit-modal-title').textContent = 'Add commit';
+  document.getElementById('cm-save-btn').textContent = 'Add';
+  _populateModalSelects();
+  document.getElementById('cm-ts').value = '';
+  document.getElementById('cm-note').value = '';
+  document.getElementById('cm-error').style.display = 'none';
+  document.getElementById('commit-modal').style.display = 'flex';
+}
+
+async function openEditCommit(eventId) {
+  CM.mode = 'edit'; CM.eventId = eventId;
+  document.getElementById('commit-modal-title').textContent = 'Edit commit';
+  document.getElementById('cm-save-btn').textContent = 'Save';
+  _populateModalSelects();
+  document.getElementById('cm-error').style.display = 'none';
+  document.getElementById('commit-modal').style.display = 'flex';
+  // Pre-fill from commits-log cache (search through last loaded items)
+  try {
+    const params = new URLSearchParams({ page: CL.page, limit: 200, search: '' });
+    const d = await API(`/api/commits-log?${params}`);
+    const ev = (d.items||[]).find(x => x.event_id === eventId);
+    if (ev) {
+      const tSel = document.getElementById('cm-truck');
+      const sSel = document.getElementById('cm-site');
+      const stSel = document.getElementById('cm-status');
+      for (let o of tSel.options) if (o.value === ev.truck_id) { o.selected = true; break; }
+      for (let o of sSel.options) if (o.value === ev.site_id)  { o.selected = true; break; }
+      for (let o of stSel.options) if (o.value === ev.status)  { o.selected = true; break; }
+      if (ev.timestamp_effective) {
+        const d = new Date(ev.timestamp_effective);
+        // datetime-local expects "YYYY-MM-DDTHH:MM"
+        document.getElementById('cm-ts').value = d.toISOString().slice(0,16);
+      }
+    }
+  } catch(e) { /* pre-fill optional */ }
+}
+
+function closeCommitModal() {
+  document.getElementById('commit-modal').style.display = 'none';
+}
+
+async function saveCommitModal() {
+  const errEl = document.getElementById('cm-error');
+  errEl.style.display = 'none';
+  const truck_id = document.getElementById('cm-truck').value;
+  const status   = document.getElementById('cm-status').value;
+  const site_id  = document.getElementById('cm-site').value;
+  const tsRaw    = document.getElementById('cm-ts').value;
+  const note     = document.getElementById('cm-note').value.trim();
+
+  // Convert datetime-local to ISO
+  const ts = tsRaw ? new Date(tsRaw).toISOString() : null;
+
+  try {
+    if (CM.mode === 'add') {
+      await API('/api/commits', {
+        method: 'POST',
+        body: JSON.stringify({ truck_id, status, site_id, timestamp_effective: ts, note: note||null }),
+      });
+    } else {
+      const body = {};
+      if (truck_id) body.truck_id = truck_id;
+      if (status)   body.status   = status;
+      if (site_id)  body.site_id  = site_id;
+      if (ts)       body.timestamp_effective = ts;
+      if (note)     body.note     = note;
+      await API(`/api/commits/${CM.eventId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+    }
+    closeCommitModal();
+    loadCommits();
+  } catch(e) {
+    errEl.textContent = e.message;
+    errEl.style.display = 'block';
+  }
+}
+
+async function deleteCommit(eventId) {
+  if (!confirm('Mark this commit as deleted? (soft delete — can be recovered from audit log)')) return;
+  try {
+    await API(`/api/commits/${eventId}`, { method: 'DELETE' });
+    loadCommits();
+  } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+function changeCommitPage(delta) {
+  const next = CL.page + delta;
+  if (next < 1 || next > CL.totalPages) return;
+  CL.page = next;
+  loadCommits();
+}
+
+function populateCommitFilters() {
+  const truckSel = document.getElementById('cl-truck');
+  const siteSel = document.getElementById('cl-site');
+  if (truckSel.options.length <= 1) {
+    (S.trucks || []).forEach(t => {
+      const o = new Option(t.display_name || t.truck_id, t.truck_id);
+      truckSel.add(o);
+    });
+  }
+  if (siteSel.options.length <= 1) {
+    (S.sites || []).forEach(s => {
+      const o = new Option(s.display_name || s.site_id, s.site_id);
+      siteSel.add(o);
+    });
+  }
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────
+function switchTab(id, el) {
+  document.querySelectorAll('.main').forEach(m=>m.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+  el.classList.add('active');
+  if(id === 'operator')  { loadMessages(); refreshHITL(); }
+  if(id === 'dashboard') { refreshKPIs(); refreshSiteAnalytics(); refreshShiftReport(); }
+  if(id === 'commits')   { populateCommitFilters(); loadCommits(); }
+  if(id === 'admin')     { loadTruckRegistry(); loadSiteRegistry(); loadShiftConfig(); }
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────
+// Return the shortest useful truck label: prefer alias if it's genuinely short (≤3 chars and not same as ID)
+// Normalises "TA"→"A", "TB"→"B" etc. when alias === id
+function shortTruck(alias, id) {
+  const label = (alias || id || '–').trim();
+  if (!label || label === '–') return label;
+  // If alias === id and looks like T+letter(s), strip the T
+  if (label === (id||'').trim() && /^T[A-Z0-9]{1,2}$/i.test(label)) return label.slice(1);
+  return label;
+}
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) { return String(s||'').replace(/"/g,'&quot;'); }
+
+// ── Manual message injection ──────────────────────────────────────────────
+function setInjectText(t) { document.getElementById('inject-text').value = t; }
+
+async function sendManualMessage() {
+  const text = document.getElementById('inject-text').value.trim();
+  if (!text) return;
+  const sender = document.getElementById('inject-sender').value.trim() || 'operator';
+  const btn = document.getElementById('inject-btn');
+  const res = document.getElementById('inject-result');
+
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  res.style.display = 'none';
+
+  try {
+    await API('/api/ingest/manual', {
+      method: 'POST',
+      body: JSON.stringify({ text, sender_name: sender, sender_id: 'manual' }),
+    });
+
+    // Clear immediately — pending state + result shown via WebSocket events
+    document.getElementById('inject-text').value = '';
+    res.style.display = 'block';
+    res.style.background = 'var(--color-background-secondary)';
+    res.style.border = '0.5px solid var(--color-border-tertiary)';
+    res.textContent = '↑ Queued — LLM result will appear in message map below';
+    setTimeout(() => { res.style.display = 'none'; }, 4000);
+  } catch(e) {
+    res.style.display = 'block';
+    res.style.background = 'var(--color-background-danger)';
+    res.style.border = '0.5px solid var(--color-text-danger)';
+    res.textContent = `Error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Send ↗';
+  }
+}
+
+async function loadInjectStatus() {
+  try {
+    const d = await API('/api/ingest/status');
+    const badge = document.getElementById('inject-llm-badge');
+    const labels = { mock: 'mock mode', openai_compat: d.endpoint, vllm_inprocess: 'vLLM in-process' };
+    badge.textContent = `LLM: ${labels[d.mode] || d.mode}`;
+    badge.style.color = d.mode === 'mock' ? 'var(--color-text-warning)' : '#27500A';
+  } catch {}
+}
+
+// ── Shift control ─────────────────────────────────────────────────────────
+
+async function shiftAction(action) {
+  const msgEl = document.getElementById('shift-ctrl-msg');
+  const nameEl = document.getElementById('shift-ctrl-name');
+  msgEl.textContent = 'Working…';
+  try {
+    const d = await API(`/api/shifts/${action}`, {method:'POST'});
+    const shift = d.shift;
+    const label = shift ? (shift.shift_name || `Shift ${shift.shift_number}`) : '–';
+    if(action === 'end') {
+      msgEl.textContent = 'Shift ended.';
+      if(nameEl) nameEl.textContent = 'No active shift';
+    } else {
+      msgEl.textContent = `${action === 'resume' ? 'Resumed' : 'Started'}: ${label}`;
+      if(nameEl) nameEl.textContent = `Active: ${label}`;
+    }
+    refreshKPIs();
+    setTimeout(() => { if(msgEl) msgEl.textContent = ''; }, 4000);
+  } catch(e) {
+    msgEl.style.color = 'var(--color-text-danger)';
+    msgEl.textContent = e.message;
+    setTimeout(() => { msgEl.style.color=''; msgEl.textContent=''; }, 5000);
+  }
+}
+
+// ── Manual map (unmapped events) ──────────────────────────────────────────
+
+async function loadRegistriesForMap() {
+  try {
+    const [tr, sr] = await Promise.all([
+      API('/api/registry/trucks'),
+      API('/api/registry/sites'),
+    ]);
+    S.trucks = tr.trucks || [];
+    S.sites  = sr.sites  || [];
+  } catch(e) {}
+}
+
+async function submitMap(eventId) {
+  const truck  = document.getElementById(`map-truck-${eventId}`)?.value;
+  const status = document.getElementById(`map-status-${eventId}`)?.value;
+  const site   = document.getElementById(`map-site-${eventId}`)?.value;
+  const msgEl  = document.getElementById(`map-msg-${eventId}`);
+  if(!truck || !status || !site) {
+    if(msgEl) { msgEl.style.color='var(--color-text-danger)'; msgEl.textContent='Select trolley, status and site first'; }
+    return;
+  }
+  try {
+    if(msgEl) msgEl.textContent = 'Saving…';
+    await API(`/api/events/${eventId}/map`, {
+      method: 'POST',
+      body: JSON.stringify({truck_id: truck, status, site_id: site}),
+    });
+    const row = document.getElementById(`msg-row-${eventId}`);
+    if(row) row.style.opacity = '0.5';
+    if(msgEl) { msgEl.style.color='var(--color-committed-text,#27500A)'; msgEl.textContent='Committed ✓'; }
+    setTimeout(loadMessages, 800);
+  } catch(e) {
+    if(msgEl) { msgEl.style.color='var(--color-text-danger)'; msgEl.textContent='Error: '+e.message; }
+  }
+}
+
+// ── System status ─────────────────────────────────────────────────────────
+
+function setDot(id, up) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = 'dot ' + (up === true ? 'green' : up === false ? 'red' : 'gray');
+  el.title = (up === true ? 'Online' : up === false ? 'Offline' : 'Unknown');
+}
+
+async function triggerReprocess() {
+  const btn = document.getElementById('reprocess-btn');
+  btn.disabled = true; btn.textContent = '↺ Processing…';
+  try {
+    const d = await API('/api/ingest/reprocess-held', {method:'POST'});
+    showReprocessBanner(d.message || `Reprocessing ${d.reprocessed} messages…`, 'info');
+    if(d.reprocessed === 0) { btn.disabled = false; btn.textContent = '↺ Reprocess held'; }
+  } catch(e) {
+    showReprocessBanner('Reprocess failed: ' + e.message, 'error');
+    btn.disabled = false; btn.textContent = '↺ Reprocess held';
+  }
+}
+
+function showReprocessBanner(msg, type) {
+  const el = document.getElementById('reprocess-banner');
+  el.textContent = msg;
+  el.className = 'reprocess-banner visible' + (type === 'success' ? ' success' : '');
+  if(type === 'success') setTimeout(() => el.classList.remove('visible','success'), 5000);
+  const btn = document.getElementById('reprocess-btn');
+  if(btn) { btn.disabled = false; btn.textContent = '↺ Reprocess held'; }
+}
+
+async function refreshStatus() {
+  try {
+    const d = await API('/api/status');
+    const s = d.services;
+    setDot('dot-llm', s.llm?.up);
+    setDot('dot-wa',  s.wa?.up);
+    setDot('dot-db',  s.db?.up);
+
+    // LLM online/offline tracking — show reprocess button when LLM recovers
+    const llmUp = s.llm?.up === true;
+    const reprocessBtn = document.getElementById('reprocess-btn');
+    if(!llmUp) {
+      S.llmWasOffline = true;
+    } else if(S.llmWasOffline && llmUp) {
+      S.llmWasOffline = false;
+      if(reprocessBtn) reprocessBtn.style.display = '';
+      showReprocessBanner('LLM is back online. Click "Reprocess held" to retry unprocessed messages.', 'info');
+    }
+
+    // Health card — services
+    const rows = [
+      {name:'Fleet API',    svc:s.api, sub:null},
+      {name:'LLM',          svc:s.llm, sub:s.llm?.endpoint},
+      {name:'WA Listener',  svc:s.wa,  sub: s.wa?.last_heartbeat ? 'last hb ' + fmtTime(new Date(s.wa.last_heartbeat*1000).toISOString()) : null},
+      {name:'Database',     svc:s.db,  sub:null},
+    ];
+    document.getElementById('health-services').innerHTML = rows.map(({name, svc, sub}) => {
+      const up = svc?.up;
+      const cls = up === true ? 'green' : up === false ? 'red' : 'gray';
+      const label = up === true ? 'Online' : up === false ? 'Offline' : 'Unknown';
+      const lc = up === true ? '#27500A' : up === false ? '#A32D2D' : 'var(--color-text-secondary)';
+      return `<div class="status-row">
+        <span class="dot ${cls}"></span>
+        <span class="status-name">${name}${sub ? `<span class="status-sub">${escHtml(sub)}</span>` : ''}</span>
+        <span class="status-label" style="color:${lc}">${label}</span>
+      </div>`;
+    }).join('');
+
+    // Incident log
+    const inc = d.incidents || [];
+    const incEl = document.getElementById('incident-log');
+    if (!inc.length) {
+      incEl.innerHTML = '<span style="color:var(--color-text-secondary);font-size:12px">No incidents recorded</span>';
+    } else {
+      incEl.innerHTML = inc.map(i => `
+        <div class="field-row" style="padding:5px 0;border-bottom:0.5px solid var(--color-border-tertiary)">
+          <span class="field-key">${escHtml(i.service)} · <b>${escHtml(i.event)}</b></span>
+          <span style="font-size:11px;color:var(--color-text-secondary)">${fmtTime(i.at)}</span>
+        </div>`).join('');
+    }
+  } catch(e) {
+    setDot('dot-llm', false);
+    setDot('dot-db',  false);
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+connectWS();
+refreshKPIs();
+refreshSiteAnalytics();
+refreshShiftReport();
+refreshHITL();
+refreshShiftHistory();
+loadInjectStatus();
+refreshStatus();
+loadRegistriesForMap();
+setInterval(refreshStatus, 30_000);
+</script>
+</body>
+</html>

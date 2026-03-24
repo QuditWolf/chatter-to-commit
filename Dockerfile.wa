@@ -1,0 +1,19 @@
+FROM node:20-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY fleet_pipeline/wa_listener/package*.json ./
+RUN npm install --omit=dev
+
+COPY fleet_pipeline/wa_listener/index.js ./
+
+ENV FLEET_API_URL=http://api:8000 \
+    WA_HEALTH_PORT=3001 \
+    WA_SESSION_DIR=/session
+
+EXPOSE 3001
+
+CMD ["node", "index.js"]

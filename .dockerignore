@@ -1,0 +1,12 @@
+**/__pycache__
+**/*.pyc
+.git
+.env
+*.db
+*.db-shm
+*.db-wal
+fleet_pipeline/wa_listener/node_modules/
+fleet_pipeline/data/
+logs/
+_archive/
+*.egg-info
