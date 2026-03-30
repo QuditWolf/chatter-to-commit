@@ -327,6 +327,23 @@ tr:last-child td { border-bottom: none; }
 </style>
 </head>
 <body>
+
+<!-- ── Login overlay ──────────────────────────────────────────────────────── -->
+<div id="login-overlay" style="display:none;position:fixed;inset:0;background:var(--color-background-tertiary);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-primary);border-radius:var(--border-radius-lg);padding:32px 28px;width:320px;max-width:90vw;">
+    <div style="font-size:15px;font-weight:500;margin-bottom:4px">Fleet Tracker</div>
+    <div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:20px">Enter password to continue</div>
+    <input id="login-password" type="password" placeholder="Password"
+      style="width:100%;padding:8px 10px;border:0.5px solid var(--color-border-primary);border-radius:var(--border-radius-md);margin-bottom:12px;font-size:13px;outline:none;background:var(--color-background-secondary)"
+      onkeydown="if(event.key==='Enter')doLogin()"/>
+    <button onclick="doLogin()"
+      style="width:100%;padding:8px;background:var(--color-text-primary);color:var(--color-background-primary);border:none;border-radius:var(--border-radius-md);font-size:13px;font-weight:500;cursor:pointer">
+      Sign in
+    </button>
+    <div id="login-error" style="margin-top:10px;font-size:12px;color:var(--color-text-danger);min-height:16px"></div>
+  </div>
+</div>
+
 <div class="app">
 
 <!-- ── Topbar ──────────────────────────────────────────────────────── -->
@@ -779,9 +796,50 @@ const S = {
   llmWasOffline: false, // track LLM offline→online transition for reprocess prompt
 };
 
+// ── Auth helpers ──────────────────────────────────────────────────────────
+const getToken = () => sessionStorage.getItem('fleet_token') || '';
+
+function showLogin() {
+  document.getElementById('login-overlay').style.display = 'flex';
+  document.querySelector('.app').style.display = 'none';
+}
+function hideLogin() {
+  document.getElementById('login-overlay').style.display = 'none';
+  document.querySelector('.app').style.display = '';
+}
+
+async function doLogin() {
+  const pw = document.getElementById('login-password').value;
+  const errEl = document.getElementById('login-error');
+  errEl.textContent = '';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({password: pw}),
+    });
+    if(!r.ok) { errEl.textContent = 'Wrong password.'; return; }
+    const data = await r.json();
+    sessionStorage.setItem('fleet_token', data.token);
+    hideLogin();
+    startApp();
+  } catch(e) { errEl.textContent = 'Connection error.'; }
+}
+
+async function initAuth() {
+  try {
+    const status = await fetch('/api/auth/status').then(r => r.json());
+    if(!status.auth_required || getToken()) { hideLogin(); startApp(); return; }
+  } catch(e) { startApp(); return; }
+  showLogin();
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 const API = async (path, opts={}) => {
-  const r = await fetch(path, {headers:{'Content-Type':'application/json'},...opts});
+  const token = getToken();
+  const authHeader = token ? {'Authorization': `Bearer ${token}`} : {};
+  const r = await fetch(path, {headers:{'Content-Type':'application/json',...authHeader},...opts});
+  if(r.status === 401) { sessionStorage.removeItem('fleet_token'); showLogin(); throw new Error('Unauthorized'); }
   if(!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   return r.json();
 };
@@ -830,7 +888,9 @@ let ws, wsRetry = 0;
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const token = getToken();
+  const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+  ws = new WebSocket(`${proto}://${location.host}/ws${qs}`);
 
   ws.onopen = () => {
     S.wsConnected = true; wsRetry = 0;
@@ -1991,16 +2051,20 @@ async function refreshStatus() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
-connectWS();
-refreshKPIs();
-refreshSiteAnalytics();
-refreshShiftReport();
-refreshHITL();
-refreshShiftHistory();
-loadInjectStatus();
-refreshStatus();
-loadRegistriesForMap();
-setInterval(refreshStatus, 30_000);
+function startApp() {
+  connectWS();
+  refreshKPIs();
+  refreshSiteAnalytics();
+  refreshShiftReport();
+  refreshHITL();
+  refreshShiftHistory();
+  loadInjectStatus();
+  refreshStatus();
+  loadRegistriesForMap();
+  setInterval(refreshStatus, 30_000);
+}
+
+initAuth();
 </script>
 </body>
 </html>

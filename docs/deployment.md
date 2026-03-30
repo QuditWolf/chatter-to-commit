@@ -10,7 +10,7 @@
 
 ```bash
 # 1. Clone and enter the repo
-git clone <repo> && cd fleet-tracker
+git clone https://github.com/QuditWolf/chatter-to-commit && cd chatter-to-commit
 
 # 2. Create your .env
 cp .env.example .env
@@ -163,6 +163,12 @@ Replace `127.0.0.1:8000` with the Docker-mapped HOST_PORT if using Docker withou
 ---
 
 ## Environment Variables Reference
+
+### Auth
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FLEET_AUTH_PASSWORD` | *(blank)* | Password to access the dashboard and all API endpoints. Leave blank to disable auth (dev only). |
 
 ### Host / network
 

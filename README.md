@@ -6,6 +6,22 @@ Built for actual paddy-harvesting tractor-trolley fleets. Running in production.
 
 ---
 
+## Screenshots
+
+**Live operator dashboard** — fleet KPIs, per-site occupancy, and shift summary updating in real time via WebSocket.
+
+![Dashboard](dashboard.png)
+
+**Structured event log** — every raw WhatsApp message mapped to its parsed events with commit status, confidence, LLM reasoning, and edit controls.
+
+![Commits](commits.png)
+
+**Operator panel** — manual message injection and the HITL queue showing open questions waiting for operator clarification (answered by replying in WA, no web UI needed).
+
+![Operator panel](operator1.png)
+
+---
+
 ## The Problem
 
 Operators don't use structured forms. They use WhatsApp. Messages look like:

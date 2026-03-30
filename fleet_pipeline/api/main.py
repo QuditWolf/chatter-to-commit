@@ -19,14 +19,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
 from fleet_pipeline.config import API_HOST, API_PORT, BASE_DIR, LLM_MOCK, LLM_BASE_URL
 
+from fleet_pipeline.api.auth import auth_enabled, verify_token
 from fleet_pipeline.api.routes import fleet, hitl, simulation, analytics
 from fleet_pipeline.api.routes import step_sim
 from fleet_pipeline.api.routes import messages as messages_route
@@ -81,6 +82,32 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ── Auth middleware ───────────────────────────────────────────────────────────
+# Paths that never require a token:
+#   /              — serves the frontend HTML (auth handled in JS)
+#   /static/       — CSS/JS assets
+#   /health        — liveness probe
+#   /api/auth/     — login + status endpoints
+#   /api/ingest/wa-message  — called by Node.js WA listener (internal network only)
+#   /docs, /openapi.json, /redoc  — FastAPI Swagger UI (dev)
+_AUTH_EXEMPT = (
+    "/static/", "/api/auth/", "/api/ingest/wa-message",
+    "/docs", "/openapi.json", "/redoc",
+)
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path in ("/", "/health") or any(path.startswith(e) for e in _AUTH_EXEMPT):
+        return await call_next(request)
+    if not auth_enabled():
+        return await call_next(request)
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+    if not verify_token(token):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
 # ── WebSocket connection manager ─────────────────────────────────────────────
 
 class ConnectionManager:
@@ -114,7 +141,10 @@ app.state.ws_manager = ws_manager
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
+    if not verify_token(token):
+        await websocket.close(code=4001)
+        return
     await ws_manager.connect(websocket)
     try:
         while True:
@@ -129,6 +159,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # ── REST routes ──────────────────────────────────────────────────────────────
 
+from fleet_pipeline.api import auth as auth_module
+app.include_router(auth_module.router)
 app.include_router(fleet.router)
 app.include_router(hitl.router)
 app.include_router(simulation.router)
