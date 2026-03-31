@@ -4,7 +4,8 @@ Message ingestion.
 POST /api/ingest/wa-message     — called by Node.js WA listener (non-blocking)
 POST /api/ingest/manual         — operator panel injection (blocking)
 GET  /api/ingest/status         — LLM mode / endpoint info
-POST /api/ingest/reprocess-held — re-run messages that were HELD due to LLM being offline
+POST /api/ingest/reprocess-held         — re-run messages that were HELD due to LLM being offline
+POST /api/ingest/reprocess-event/{id}  — re-run a single HELD event by event_id
 """
 import asyncio
 import logging
@@ -310,6 +311,69 @@ async def reprocess_held():
 
     asyncio.create_task(_run_all())
     return {"reprocessed": len(msgs), "message": f"Reprocessing {len(msgs)} held messages in background"}
+
+
+@router.post("/reprocess-event/{event_id}")
+async def reprocess_single_event(event_id: str):
+    """
+    Re-run a single HELD event by event_id.
+    Looks up the raw message via the event's msg_id and re-processes it through the pipeline.
+    """
+    import sqlite3
+    from fleet_pipeline.config import DB_PATH
+    from fleet_pipeline.api.main import ws_manager
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT rm.msg_id, rm.raw_text, rm.timestamp_iso,
+                      rm.sender_name, rm.sender_id, rm.source_file
+               FROM events e
+               JOIN raw_messages rm ON e.msg_id = rm.msg_id
+               WHERE e.event_id = ? AND e.commit_status = 'HELD'
+               LIMIT 1""",
+            (event_id,),
+        ).fetchone()
+
+    if not row:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="HELD event not found")
+
+    m = dict(row)
+
+    async def _run():
+        from functools import partial
+        from fleet_pipeline.api.pipeline_service import process_raw_text
+        from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+        loop = asyncio.get_event_loop()
+        try:
+            summary = await loop.run_in_executor(
+                None,
+                partial(
+                    process_raw_text,
+                    raw_text=m["raw_text"],
+                    sender_name=m["sender_name"] or "unknown",
+                    sender_id=m["sender_id"] or "unknown",
+                    timestamp_iso=m["timestamp_iso"],
+                    source=m["source_file"] or "reprocess",
+                ),
+            )
+            invalidate_kpi_cache()
+            await ws_manager.broadcast("commit_created", {
+                "msg_id":    summary.get("msg_id", ""),
+                "raw_text":  summary.get("raw_text", ""),
+                "committed": summary.get("committed", 0),
+                "flagged":   summary.get("flagged", 0),
+                "held":      summary.get("held", 0),
+                "source":    "reprocess",
+            })
+            await ws_manager.broadcast("reprocess_complete", {"count": 1})
+        except Exception as exc:
+            log.warning("Reprocess failed for event %s: %s", event_id, exc)
+            await ws_manager.broadcast("reprocess_complete", {"count": 0, "error": str(exc)})
+
+    asyncio.create_task(_run())
+    return {"reprocessed": 1, "message": f"Reprocessing event {event_id} in background"}
 
 
 @router.get("/status")

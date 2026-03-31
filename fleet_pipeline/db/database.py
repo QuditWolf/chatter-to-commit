@@ -599,9 +599,9 @@ def get_messages_page(
 def get_fleet_kpis(conn: sqlite3.Connection) -> Dict[str, Any]:
     """KPI summary: in loading, unloading, transit counts + loaded today."""
     fleet = get_fleet_state(conn)
-    in_loading = [t for t in fleet if t.get("status") in ("ENTER", "LS", "LO") and
+    in_loading = [t for t in fleet if t.get("status") == "LS" and
                   _is_loading_site(conn, t.get("site_id"))]
-    in_unloading = [t for t in fleet if t.get("status") in ("ENTER", "US", "UO") and
+    in_unloading = [t for t in fleet if t.get("status") == "US" and
                     not _is_loading_site(conn, t.get("site_id"))]
     in_transit = [t for t in fleet if t.get("status") == "LEFT"]
 

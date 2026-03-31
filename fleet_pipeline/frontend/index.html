@@ -1334,8 +1334,10 @@ async function loadMessages() {
       } else if(isUnmapped) {
         // LLM failed or couldn't identify truck — show manual map form
         rightHtml = `
-          <div style="font-size:11px;color:var(--color-text-danger);font-weight:500;margin-bottom:8px">
-            ⚠ Not mapped — LLM was offline
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:11px;color:var(--color-text-danger);font-weight:500">⚠ Not mapped — LLM was offline</span>
+            <button class="correct-btn" id="retry-btn-${item.event_id}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLM('${item.event_id}')">↺ Retry with LLM</button>
+            <span id="retry-msg-${item.event_id}" style="font-size:11px;color:var(--color-text-secondary)"></span>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:6px">
             <select id="map-truck-${item.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
@@ -1964,6 +1966,21 @@ async function submitMap(eventId) {
     setTimeout(loadMessages, 800);
   } catch(e) {
     if(msgEl) { msgEl.style.color='var(--color-text-danger)'; msgEl.textContent='Error: '+e.message; }
+  }
+}
+
+async function retryWithLLM(eventId) {
+  const btn   = document.getElementById(`retry-btn-${eventId}`);
+  const msgEl = document.getElementById(`retry-msg-${eventId}`);
+  if(btn) { btn.disabled = true; btn.textContent = '…'; }
+  if(msgEl) { msgEl.textContent = 'Retrying…'; msgEl.style.color = 'var(--color-text-secondary)'; }
+  try {
+    await API(`/api/ingest/reprocess-event/${eventId}`, { method: 'POST' });
+    if(msgEl) { msgEl.textContent = 'Queued ✓'; msgEl.style.color = 'var(--color-committed-text,#27500A)'; }
+    setTimeout(loadMessages, 1500);
+  } catch(e) {
+    if(btn) { btn.disabled = false; btn.textContent = '↺ Retry with LLM'; }
+    if(msgEl) { msgEl.textContent = 'Error: '+e.message; msgEl.style.color = 'var(--color-text-danger)'; }
   }
 }
 
