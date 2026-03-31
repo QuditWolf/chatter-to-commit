@@ -539,7 +539,7 @@ def get_messages_page(
     params: list = []
 
     if hide_noise:
-        where_clauses.append("(e.commit_status IS NOT NULL AND e.commit_status != 'NOISE')")
+        where_clauses.append("(e.commit_status != 'NOISE' OR e.commit_status IS NULL)")
 
     if status_filter != "all":
         status_map = {

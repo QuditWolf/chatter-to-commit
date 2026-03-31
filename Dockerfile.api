@@ -9,6 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY fleet_pipeline/ ./fleet_pipeline/
+COPY reset_data.py .
 
 ENV FLEET_DB_PATH=/data/fleet.db \
     FLEET_API_HOST=0.0.0.0 \

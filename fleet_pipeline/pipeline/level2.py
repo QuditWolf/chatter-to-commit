@@ -48,7 +48,8 @@ class Enricher:
     ]
 
     NOISE_TOKENS = [
-        "respond", "please respond", "where is", "ok", "thanks", "thank you", "pls"
+        "respond", "please respond", "where is", "ok", "thanks", "thank you", "pls",
+        "warmup", "system warmup message"
     ]
 
     OPS_TOKENS = [

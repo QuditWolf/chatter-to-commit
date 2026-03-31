@@ -5,9 +5,12 @@ Run this to clear last year's data and start fresh.
   python3 reset_data.py
   python3 reset_data.py --confirm    # skip the confirmation prompt
 """
+import os
 import sqlite3, sys, pathlib
 
-DB_PATH = pathlib.Path(__file__).parent / "fleet_pipeline" / "data" / "fleet.db"
+# Use FLEET_DB_PATH env var if set (for container), otherwise use default path
+DB_PATH_STR = os.environ.get("FLEET_DB_PATH", str(pathlib.Path(__file__).parent / "fleet_pipeline" / "data" / "fleet.db"))
+DB_PATH = pathlib.Path(DB_PATH_STR)
 
 TABLES_TO_CLEAR = [
     "events",
