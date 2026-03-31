@@ -546,7 +546,7 @@ tr:last-child td { border-bottom: none; }
       <button class="filter-btn" onclick="setMsgFilter('flagged',this)">Flagged</button>
       <button class="filter-btn" onclick="setMsgFilter('held',this)">Held</button>
       <button class="filter-btn" onclick="setMsgFilter('corrected',this)">Corrected</button>
-      <button class="filter-btn" id="noise-toggle-btn" onclick="toggleHideNoise(this)" style="margin-left:4px">Show noise</button>
+      <button class="filter-btn active" id="noise-toggle-btn" onclick="toggleHideNoise(this)" style="margin-left:4px">Show noise ✓</button>
       <input type="text" id="msg-search" placeholder="Search trolley, site, message…" oninput="debounceMsgSearch(this.value)"/>
     </div>
 
@@ -786,7 +786,7 @@ const S = {
   msgPage: 1,
   msgFilter: 'all',
   msgSearch: '',
-  msgHideNoise: false,
+  msgHideNoise: true,
   msgTotalPages: 1,
   correctEventId: null,
   searchDebounce: null,
@@ -844,22 +844,23 @@ const API = async (path, opts={}) => {
   return r.json();
 };
 
+const _IST = {timeZone: 'Asia/Kolkata'};
 const fmtTime = iso => {
   if(!iso) return '–';
   try {
     const d = new Date(iso);
-    const today = new Date();
-    const isToday = d.getFullYear()===today.getFullYear() && d.getMonth()===today.getMonth() && d.getDate()===today.getDate();
-    const time = d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false});
-    if(isToday) return time;
-    const dateStr = d.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
+    const time = d.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', hour12:false, ..._IST});
+    const nowDate = new Date().toLocaleDateString('en-CA', _IST);
+    const msgDate = d.toLocaleDateString('en-CA', _IST);
+    if(nowDate === msgDate) return time;
+    const dateStr = d.toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric', ..._IST});
     return `${dateStr} ${time}`;
   } catch{ return iso.slice(0,16)||'–'; }
 };
 
 const fmtDate = iso => {
   if(!iso) return '–';
-  try { return new Date(iso).toLocaleDateString('en-IN'); }
+  try { return new Date(iso).toLocaleDateString('en-IN', _IST); }
   catch{ return iso.slice(0,10)||'–'; }
 };
 
@@ -917,11 +918,18 @@ function connectWS() {
 function handleWSEvent(type, data) {
   if(type === 'fleet_state_updated') { refreshKPIs(); refreshSiteAnalytics(); refreshShiftReport(); }
   if(type === 'commit_created') {
-    // Remove from pending (by ID for WA, by text for manual) and reload commit log
-    if(data.msg_id) removePending(data.msg_id);
-    if(data.raw_text) removePendingByText(data.raw_text);
     refreshKPIs();
-    if(document.getElementById('tab-operator').classList.contains('active')) loadMessages();
+    if(document.getElementById('tab-operator').classList.contains('active')) {
+      // Load DB results first (spinner still visible via renderPending inside loadMessages),
+      // then remove pending so spinner disappears after results are shown.
+      loadMessages().then(() => {
+        if(data.msg_id) removePending(data.msg_id);
+        if(data.raw_text) removePendingByText(data.raw_text);
+      });
+    } else {
+      if(data.msg_id) removePending(data.msg_id);
+      if(data.raw_text) removePendingByText(data.raw_text);
+    }
   }
   if(type === 'message_received') {
     // Show immediately in commit log with processing spinner
@@ -1306,6 +1314,7 @@ async function loadMessages() {
 
     if(!d.items || !d.items.length) {
       document.getElementById('msg-map-body').innerHTML = '<div class="empty-state">No messages found</div>';
+      renderPending();
       return;
     }
 
@@ -1320,6 +1329,7 @@ async function loadMessages() {
       const isUnmapped = item.event_id && statusStr === 'HELD' && !item.truck_id;
       const correctBtn = item.event_id ? `<button class="correct-btn" onclick='openCorrectPanel(${JSON.stringify({event_id:item.event_id,raw:item.raw_text,truck:item.truck_alias||item.truck_id,status:item.status,site:item.site_alias||item.site_id,shift:item.shift_id})})'>Correct</button>` : '';
       const commitBtn = (statusStr==='FLAGGED'||statusStr==='HELD') && item.truck_id ? `<button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none" onclick="forceCommit('${item.event_id}')">Commit</button>` : '';
+      const rellmBtn = item.event_id && (statusStr==='FLAGGED'||statusStr==='HELD') ? `<button class="correct-btn" id="retry-btn-${item.event_id}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLM('${item.event_id}')">↺ Re-LLM</button>` : '';
       const reasoningHtml = item.reasoning ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:4px;line-height:1.4;max-width:280px">${escHtml(item.reasoning)}</div>` : '';
 
       let rightHtml = '';
@@ -1370,12 +1380,15 @@ async function loadMessages() {
           <div class="commit-status">
             <span class="dot ${dotCls}"></span>
             <span style="font-size:11px;color:var(--color-text-secondary)">${statusStr||'–'}${conf?' · conf '+conf.toFixed(2):''}</span>
-            ${commitBtn} ${correctBtn}
+            ${rellmBtn} ${commitBtn} ${correctBtn}
           </div>
           ${reasoningHtml}
           <div class="conf-bar-wrap"><div class="conf-bar" style="width:${barW}%;background:${barColor}"></div></div>`;
       } else {
-        rightHtml = `<div style="font-size:11px;color:var(--color-text-secondary)">No commit — ${statusStr||'unparsed'}</div>`;
+        rightHtml = `<div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--color-text-secondary)">
+          No commit — ${statusStr||'unparsed'}
+          ${item.msg_id ? `<button class="correct-btn" id="retry-msg-btn-${item.msg_id}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLMByMsg('${item.msg_id}')">↺ Re-LLM</button><span id="retry-msg-msg-${item.msg_id}" style="font-size:11px;color:var(--color-text-secondary)"></span>` : ''}
+        </div>`;
       }
       return `<div class="msg-row" id="msg-row-${item.event_id||''}">
         <div>
@@ -1979,7 +1992,22 @@ async function retryWithLLM(eventId) {
     if(msgEl) { msgEl.textContent = 'Queued ✓'; msgEl.style.color = 'var(--color-committed-text,#27500A)'; }
     setTimeout(loadMessages, 1500);
   } catch(e) {
-    if(btn) { btn.disabled = false; btn.textContent = '↺ Retry with LLM'; }
+    if(btn) { btn.disabled = false; btn.textContent = '↺ Re-LLM'; }
+    if(msgEl) { msgEl.textContent = 'Error: '+e.message; msgEl.style.color = 'var(--color-text-danger)'; }
+  }
+}
+
+async function retryWithLLMByMsg(msgId) {
+  const btn   = document.getElementById(`retry-msg-btn-${msgId}`);
+  const msgEl = document.getElementById(`retry-msg-msg-${msgId}`);
+  if(btn) { btn.disabled = true; btn.textContent = '…'; }
+  if(msgEl) { msgEl.textContent = 'Retrying…'; msgEl.style.color = 'var(--color-text-secondary)'; }
+  try {
+    await API(`/api/ingest/reprocess-message/${msgId}`, { method: 'POST' });
+    if(msgEl) { msgEl.textContent = 'Queued ✓'; msgEl.style.color = 'var(--color-committed-text,#27500A)'; }
+    setTimeout(loadMessages, 1500);
+  } catch(e) {
+    if(btn) { btn.disabled = false; btn.textContent = '↺ Re-LLM'; }
     if(msgEl) { msgEl.textContent = 'Error: '+e.message; msgEl.style.color = 'var(--color-text-danger)'; }
   }
 }

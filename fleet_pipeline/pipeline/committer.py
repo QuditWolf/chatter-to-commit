@@ -204,6 +204,11 @@ class Committer:
             expanded.append(ev)
         events = expanded
 
+        # Sort events by logical cycle order so that ENTER → LS/US → LO/UO → LEFT
+        # are committed in the correct sequence regardless of LLM output order.
+        _STATUS_ORDER = {"ENTER": 0, "LS": 1, "US": 1, "LO": 2, "UO": 2, "LEFT": 3}
+        events.sort(key=lambda e: _STATUS_ORDER.get(e.get("status", ""), 99))
+
         for ev in events:
             truck_id = ev.get("truck_id")
             site_id = ev.get("site_id")

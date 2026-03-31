@@ -376,6 +376,65 @@ async def reprocess_single_event(event_id: str):
     return {"reprocessed": 1, "message": f"Reprocessing event {event_id} in background"}
 
 
+@router.post("/reprocess-message/{msg_id}")
+async def reprocess_message_by_id(msg_id: str):
+    """
+    Re-run any raw_message through the full pipeline by msg_id.
+    Works regardless of whether the message has an existing event — for unparsed/failed messages.
+    """
+    import sqlite3
+    from fleet_pipeline.config import DB_PATH
+    from fleet_pipeline.api.main import ws_manager
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT msg_id, raw_text, timestamp_iso, sender_name, sender_id, source_file
+               FROM raw_messages WHERE msg_id = ?""",
+            (msg_id,),
+        ).fetchone()
+
+    if not row:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    m = dict(row)
+
+    async def _run():
+        from functools import partial
+        from fleet_pipeline.api.pipeline_service import process_raw_text
+        from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+        loop = asyncio.get_event_loop()
+        try:
+            summary = await loop.run_in_executor(
+                None,
+                partial(
+                    process_raw_text,
+                    raw_text=m["raw_text"],
+                    sender_name=m["sender_name"] or "unknown",
+                    sender_id=m["sender_id"] or "unknown",
+                    timestamp_iso=m["timestamp_iso"],
+                    source=m["source_file"] or "reprocess",
+                ),
+            )
+            invalidate_kpi_cache()
+            await ws_manager.broadcast("commit_created", {
+                "msg_id":    summary.get("msg_id", ""),
+                "raw_text":  summary.get("raw_text", ""),
+                "committed": summary.get("committed", 0),
+                "flagged":   summary.get("flagged", 0),
+                "held":      summary.get("held", 0),
+                "source":    "reprocess",
+            })
+            await ws_manager.broadcast("reprocess_complete", {"count": 1})
+        except Exception as exc:
+            log.warning("Reprocess failed for msg %s: %s", msg_id, exc)
+            await ws_manager.broadcast("reprocess_complete", {"count": 0, "error": str(exc)})
+
+    asyncio.create_task(_run())
+    return {"reprocessed": 1, "message": f"Reprocessing message {msg_id} in background"}
+
+
 @router.get("/status")
 def ingest_status():
     """Returns current LLM mode and endpoint config (no secrets)."""

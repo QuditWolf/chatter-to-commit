@@ -97,6 +97,15 @@ RULE 7c — Same-sender site hint (LOW confidence only):
   Do NOT use this rule to produce confidence > 0.65. Do NOT apply to CASE A events
   (open-cycle inference already handles those at high confidence).
 
+RULE 7d — Multi-status single-truck messages:
+  "D LO LEFT" or "G enter LS LG" → one truck, multiple sequential statuses in one message.
+  Emit one event per status in CYCLE ORDER: ENTER → LS/US → LO/UO → LEFT.
+  Each status is EXPLICIT (inferred=false) with the same truck and site (if given).
+  Do NOT apply RULE 8 inferences for statuses already explicit in the message.
+  "G enter LS LG" → Event 1: G ENTER at LG; Event 2: G LS at LG (both explicit).
+  "D LO LEFT" (no site, open cycle at X) → Event 1: D LO at X (CASE A inferred site);
+                                            Event 2: D LEFT at X (CASE A inferred site).
+
 RULE 8 — Inferred intermediate steps (CRITICAL):
   Check L3_CONTEXT for each truck's last status. If the message implies steps were skipped,
   generate ADDITIONAL inferred events for the missing intermediate steps BEFORE the explicit event.
@@ -236,6 +245,19 @@ OUTPUT:
 INPUT: {"raw_text":"s2 shift start","timestamp_iso":"2025-10-20T13:00:00+05:30"}
 OUTPUT:
 {"msg_type":"NOISE","events":[],"tally":null,"query":null,"notes":"shift signal — handled by shift detector","overall_confidence":0.95,"shift_id":null,"commit_recommendation":"HOLD"}
+
+### EXAMPLE 11 — RULE 7d: Multi-status single-truck (LO + LEFT same message)
+INPUT: {"raw_text":"D LO LEFT","timestamp_iso":"2025-10-20T12:22:00+05:30"}
+L3_CONTEXT: {"last_status_events":[{"truck_id":"TD","status":"LS","site_id":"LG","timestamp_effective":"2025-10-20T12:00:00+05:30"}]}
+TRUCK_REGISTRY: {"TD":["D"]}  SITE_REGISTRY: {"LG":["Lal Ghadi","LG"], "site_type":"loading"}
+OUTPUT:
+{"msg_type":"STATUS_UPDATE","events":[{"event_id":"uuid","truck_alias":"D","truck_id":"TD","status":"LO","site_alias":"Lal Ghadi","site_id":"LG","material":null,"timestamp_effective":"2025-10-20T12:22:00+05:30","inferred":false,"confidence":0.90,"reasoning":"RULE 7d+2A: explicit LO; site inferred from open cycle at LG (last=LS)"},{"event_id":"uuid","truck_alias":"D","truck_id":"TD","status":"LEFT","site_alias":"Lal Ghadi","site_id":"LG","material":null,"timestamp_effective":"2025-10-20T12:22:00+05:30","inferred":false,"confidence":0.90,"reasoning":"RULE 7d+2A: explicit LEFT; site inferred from open cycle at LG"}],"tally":null,"query":null,"notes":"D LO then LEFT in single message; site inferred from open cycle","overall_confidence":0.90,"shift_id":null,"commit_recommendation":"COMMIT"}
+
+### EXAMPLE 12 — RULE 7d: Multi-status single-truck (ENTER + LS, site explicit)
+INPUT: {"raw_text":"G enter LS LG","timestamp_iso":"2025-10-20T10:00:00+05:30"}
+TRUCK_REGISTRY: {"TG":["G"]}  SITE_REGISTRY: {"LG":["Lal Ghadi","LG"], "site_type":"loading"}
+OUTPUT:
+{"msg_type":"STATUS_UPDATE","events":[{"event_id":"uuid","truck_alias":"G","truck_id":"TG","status":"ENTER","site_alias":"LG","site_id":"LG","material":null,"timestamp_effective":"2025-10-20T10:00:00+05:30","inferred":false,"confidence":0.95,"reasoning":"RULE 7d: explicit ENTER at LG"},{"event_id":"uuid","truck_alias":"G","truck_id":"TG","status":"LS","site_alias":"LG","site_id":"LG","material":null,"timestamp_effective":"2025-10-20T10:00:00+05:30","inferred":false,"confidence":0.95,"reasoning":"RULE 7d: explicit LS at LG"}],"tally":null,"query":null,"notes":"G entered and started loading at LG in single message","overall_confidence":0.95,"shift_id":null,"commit_recommendation":"COMMIT"}
 
 ### EXAMPLE 10 — Correction
 INPUT: {"raw_text":"sorry D not B","timestamp_iso":"2025-10-20T14:15:00+05:30"}
