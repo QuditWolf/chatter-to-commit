@@ -15,7 +15,7 @@ from fleet_pipeline.config import DB_PATH, LLM_BASE_URL, MODEL_NAME
 
 router = APIRouter(prefix="/api/status", tags=["status"])
 
-WA_HEALTH_URL = os.environ.get("FLEET_WA_HEALTH_URL", "http://localhost:3001/health")
+WA_HEALTH_URL = os.environ.get("FLEET_WA_HEALTH_URL", "http://wa:3001/health")
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
