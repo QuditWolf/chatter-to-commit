@@ -229,7 +229,9 @@ async def ingest_manual(req: ManualMessageRequest, background_tasks: BackgroundT
         "source": "manual",
     })
 
-    # Process in background — same path as WA messages
+    # Process in background — same path as WA messages.
+    # Pass wa_message_id=temp_id so the DB msg_id matches the pending key the
+    # frontend already stored, allowing removePending(data.msg_id) to work.
     background_tasks.add_task(
         _process_and_broadcast,
         raw_text=req.text,
@@ -238,6 +240,7 @@ async def ingest_manual(req: ManualMessageRequest, background_tasks: BackgroundT
         timestamp_iso=req.timestamp_iso,
         source="manual",
         msg_id=temp_id,
+        wa_message_id=temp_id,
     )
 
     return {"queued": True, "temp_id": temp_id}

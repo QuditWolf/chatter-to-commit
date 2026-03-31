@@ -928,6 +928,10 @@ function handleWSEvent(type, data) {
     addPendingMessage(data);
   }
   if(type === 'commit_error') {
+    // Raw message is always pre-saved to DB, so loadMessages() will show it
+    // (with "No commit" status). Clear pending state then reload so the DB
+    // row replaces the spinner — message never disappears from the list.
+    if(data.msg_id) removePending(data.msg_id);
     if(data.raw_text) removePendingByText(data.raw_text);
     if(document.getElementById('tab-operator').classList.contains('active')) loadMessages();
   }

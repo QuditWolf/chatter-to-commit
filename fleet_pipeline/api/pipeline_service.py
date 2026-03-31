@@ -94,6 +94,13 @@ def process_raw_text(
         "media_type": None,
     }
 
+    # Pre-save the raw message to DB immediately.
+    # This ensures it always appears in get_messages_page even if the LLM or
+    # committer later throws — preventing the message from silently vanishing.
+    # The committer's own INSERT OR IGNORE will be a no-op for the same msg_id.
+    with db.db_conn(DB_PATH) as _pre_conn:
+        db.insert_raw_message(_pre_conn, level1_msg)
+
     # Level 2 — enrich
     enricher = _get_enricher()
     level2_msg = enricher.enrich_message(level1_msg)
