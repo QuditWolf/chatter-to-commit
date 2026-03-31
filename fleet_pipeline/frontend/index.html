@@ -956,7 +956,7 @@ function handleWSEvent(type, data) {
 function addPendingMessage(data) {
   const id = data.wa_message_id || data.raw_text;
   S.pendingMessages[id] = data;
-  if(document.getElementById('tab-operator').classList.contains('active')) renderPending();
+  renderPending(); // Always render — body may exist even when tab is not active
 }
 
 function removePending(msgId) {
@@ -1305,6 +1305,7 @@ async function resolveHITL(qid, action) {
 // ── Message map ───────────────────────────────────────────────────────────
 async function loadMessages() {
   document.getElementById('msg-map-body').innerHTML = '<div class="loading-indicator">Loading…</div>';
+  renderPending(); // Keep processing spinners visible while DB fetch is in flight
   try {
     const params = new URLSearchParams({page: S.msgPage, limit: 20, status: S.msgFilter, search: S.msgSearch, hide_noise: S.msgHideNoise ? 'true' : 'false'});
     const d = await API(`/api/messages?${params}`);
