@@ -20,50 +20,100 @@ WA_LISTENER_URL = os.environ.get("WA_LISTENER_URL", "http://localhost:3001")
 
 
 def _format_hitl_message(q_type: str, context: dict, raw_text: str) -> str:
-    """Return a concise, actionable WA reply text for each HITL type."""
+    """Return a concise, actionable WA reply text for each HITL type.
+
+    All messages include:
+    - Why it was flagged (from LLM reasoning where available)
+    - Clear reply options
+    - Explicit note that natural language is accepted
+    """
     orig = f'"{raw_text}"' if raw_text else "(unknown message)"
+    reasoning = context.get("reasoning", "")
 
     if q_type == "UNKNOWN_TRUCK":
         alias = context.get("truck_alias", "?")
+        why = f"\n_Reason: {reasoning}_" if reasoning else ""
         return (
-            f"❓ *Unknown truck* — '{alias}' not recognised.\n\n"
+            f"❓ *Unknown truck* — '{alias}' not in registry.{why}\n\n"
             f"Original: {orig}\n\n"
             f"Reply with:\n"
-            f"• Existing truck code  e.g.  `TA`\n"
-            f"• Register new truck:  `new:TX:Display Name:alias`"
+            f"• Truck code  e.g.  `TB`  (adds '{alias}' as alias)\n"
+            f"• Natural language  e.g.  _that's TB_  or  _it's the big Tata_\n"
+            f"• Register new:  `new:TX:Display Name:alias`\n"
+            f"• Full corrected message  e.g.  `TB LS SOC`"
+        )
+
+    if q_type == "UNRECOGNIZED_TRUCK":
+        alias = context.get("truck_alias", "?")
+        llm_id = context.get("llm_truck_id", "?")
+        why = f"\n_Reason: {reasoning}_" if reasoning else ""
+        return (
+            f"❓ *Unrecognized truck* — '{alias}' identified as '{llm_id}' but not in registry.{why}\n\n"
+            f"Original: {orig}\n\n"
+            f"Reply with:\n"
+            f"• `YES` to add '{llm_id}' as new truck (alias: '{alias}')\n"
+            f"• Existing code  e.g.  `TB`  (maps '{alias}' → TB)\n"
+            f"• Natural language  e.g.  _that's TB_  or  _add it as T05_\n"
+            f"• Register with details:  `new:TX:Display Name:alias`"
         )
 
     if q_type == "UNKNOWN_SITE":
         alias = context.get("site_alias", "")
         if alias and alias.lower() not in ("none", "null", ""):
-            desc = f"'{alias}' not recognised"
+            desc = f"'{alias}' not in registry"
         else:
             desc = "could not be determined"
+        why = f"\n_Reason: {reasoning}_" if reasoning else ""
         return (
-            f"❓ *Unknown site* — {desc}.\n\n"
+            f"❓ *Unknown site* — {desc}.{why}\n\n"
             f"Original: {orig}\n\n"
             f"Reply with:\n"
-            f"• Site code  e.g.  `SOC`\n"
+            f"• Site code  e.g.  `SOC`  (adds '{alias}' as alias)\n"
+            f"• Natural language  e.g.  _that's SOC_  or  _it's the Bagha pit_\n"
             f"• Full corrected message  e.g.  `D LS SOC`\n"
-            f"• Register new site:  `new:SNAME:Display Name:loading:alias`"
+            f"• Register new:  `new:SNAME:Display Name:loading:alias`"
+        )
+
+    if q_type == "UNRECOGNIZED_SITE":
+        alias = context.get("site_alias", "")
+        llm_id = context.get("llm_site_id", "?")
+        why = f"\n_Reason: {reasoning}_" if reasoning else ""
+        return (
+            f"❓ *Unrecognized site* — '{alias}' identified as '{llm_id}' but not in registry.{why}\n\n"
+            f"Original: {orig}\n\n"
+            f"Reply with:\n"
+            f"• `YES` to add '{llm_id}' as new site (alias: '{alias}')\n"
+            f"• Existing code  e.g.  `SOC`  (maps '{alias}' → SOC)\n"
+            f"• Natural language  e.g.  _that's SOC_  or  _it's the new Bagha pit_\n"
+            f"• Full corrected message  e.g.  `D LS SOC`\n"
+            f"• Register with details:  `new:SNAME:Display Name:loading:alias`"
         )
 
     if q_type == "LOW_CONFIDENCE":
         conf = context.get("confidence", 0)
         parsed = context.get("parsed", "")
         pct = f"{int(conf * 100)}%" if conf else "?"
+        why = f"\n_Reason: {reasoning}_" if reasoning else ""
         return (
-            f"⚠️ *Low confidence ({pct})* — please verify.\n\n"
+            f"⚠️ *Low confidence ({pct})* — please verify.{why}\n\n"
             f"Original: {orig}\n"
             f"Parsed as: _{parsed}_\n\n"
-            f"Reply `CONFIRM` to accept, or reply with correction."
+            f"Reply with:\n"
+            f"• `CONFIRM` to accept\n"
+            f"• Natural language  e.g.  _actually it's TB not TA_\n"
+            f"• Corrected message  e.g.  `TB LS SOC`\n"
+            f"• Just the missing piece  e.g.  `SOC`  or  `truck TB`"
         )
 
     if q_type == "CORRECTION_AMBIGUOUS":
+        why = f"\n_Reason: {reasoning}_" if reasoning else ""
         return (
-            f"❓ *Ambiguous correction* — unclear what to change.\n\n"
+            f"❓ *Ambiguous correction* — unclear what to change.{why}\n\n"
             f"Original: {orig}\n\n"
-            f"Please clarify: which truck/status/site, and what should it be?"
+            f"Please clarify — reply in any form:\n"
+            f"• _D left not B, B is still at KN4_\n"
+            f"• Corrected full message  e.g.  `TD LS SOC`\n"
+            f"• Which truck / status / site to change and what it should be"
         )
 
     # Fallback

@@ -3,10 +3,23 @@ API routes for the HITL (Human-in-the-Loop) question queue.
 GET  /hitl/queue           — list open questions
 POST /hitl/answer          — submit an answer; re-processes through LLM when clarification given
 POST /hitl/dismiss/{id}    — dismiss a question
+
+Answer handling philosophy:
+  Natural language is always accepted and re-processed through the LLM with the
+  operator's text injected as operator_clarification.
+
+  Fast paths (no re-processing needed):
+    - Short code  e.g.  "TB"         → map alias to existing truck/site
+    - "new:..."                       → register new truck/site
+    - "YES" / affirmative             → for UNRECOGNIZED_* types: register the LLM-proposed ID
+    - "CONFIRM"                       → for LOW_CONFIDENCE: force-commit the held event
+
+  All other answers → re-process original message through LLM with clarification injected.
 """
 import asyncio
 import json
 import logging
+import re
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
@@ -18,11 +31,51 @@ from fleet_pipeline.pipeline.hitl_queue import answer_question, dismiss_question
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/hitl", tags=["hitl"])
 
-# Known site / truck code patterns (short uppercase codes — not free text)
+
+# ---------------------------------------------------------------------------
+# Answer parsing helpers
+# ---------------------------------------------------------------------------
+
 def _looks_like_code(s: str) -> bool:
-    """Return True if s looks like a truck/site code rather than free text."""
+    """Return True if s looks like a bare truck/site code (no spaces, short, uppercase)."""
     s = s.strip()
-    return len(s) <= 10 and s.replace("_","").replace("-","").isalnum() and s == s.upper()
+    return len(s) <= 10 and s.replace("_", "").replace("-", "").isalnum() and s == s.upper()
+
+
+_AFFIRMATIVE = frozenset({
+    "yes", "yes.", "yes!", "yep", "haan", "ha", "correct", "ok", "okay",
+    "confirm", "confirmed", "right", "sure", "add it", "add", "register it",
+    "yes add it", "yes please",
+})
+
+def _is_affirmative(s: str) -> bool:
+    return s.strip().lower() in _AFFIRMATIVE
+
+
+_CODE_IN_TEXT_RE = re.compile(
+    r"""(?:
+        it'?s\s+|that'?s\s+|is\s+|use\s+|
+        truck\s+|site\s+|map\s+(?:it\s+)?to\s+|
+        it\s+is\s+|add\s+(?:it\s+)?as\s+|register\s+as\s+
+    )([A-Z][A-Z0-9_\-]{1,9})\b""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+def _extract_code_from_answer(s: str) -> Optional[str]:
+    """
+    Try to pull a truck/site code from natural language.
+    Returns uppercase code string or None.
+
+    Handles:  'that's TB'  'it's SOC'  'use TB'  'truck TB'  'map it to SOC'
+              'add it as T05'  'TB'  'SOC'
+    """
+    stripped = s.strip()
+    if _looks_like_code(stripped):
+        return stripped.upper()
+    m = _CODE_IN_TEXT_RE.search(stripped)
+    if m:
+        return m.group(1).upper()
+    return None
 
 
 class AnswerRequest(BaseModel):
@@ -59,11 +112,16 @@ async def submit_answer(req: AnswerRequest, background_tasks: BackgroundTasks):
     """
     Submit a human answer to a HITL question.
 
-    Behaviour:
-    - UNKNOWN_TRUCK/SITE + code answer → direct DB update (fast path)
-    - UNKNOWN_TRUCK/SITE + free-text OR any LOW_CONFIDENCE/CORRECTION_AMBIGUOUS
-      → re-process original message through LLM with operator clarification
-    - LOW_CONFIDENCE + "CONFIRM" → force-commit the held event
+    Fast paths (no LLM re-processing):
+      UNKNOWN_TRUCK / UNRECOGNIZED_TRUCK:
+        "new:..."   → register new truck, commit held event
+        code / "that's TB" / "it's TB"  → map alias to existing truck, commit
+        "YES" (UNRECOGNIZED only) → register the LLM-proposed ID as new truck
+      UNKNOWN_SITE / UNRECOGNIZED_SITE: same pattern
+      LOW_CONFIDENCE + "CONFIRM"  → force-commit held event
+
+    Everything else (natural language, corrections, full sentences) →
+      re-process original message through LLM with answer as operator_clarification.
     """
     with db.db_conn(DB_PATH) as conn:
         rows = conn.execute(
@@ -90,7 +148,7 @@ async def submit_answer(req: AnswerRequest, background_tasks: BackgroundTasks):
         answer   = req.answer.strip()
         reprocess = False
 
-        # LOW_CONFIDENCE: CONFIRM = force commit; anything else = re-process
+        # ── LOW_CONFIDENCE ────────────────────────────────────────────────────
         if q_type == "LOW_CONFIDENCE":
             if answer.upper() == "CONFIRM":
                 if event_id:
@@ -101,28 +159,62 @@ async def submit_answer(req: AnswerRequest, background_tasks: BackgroundTasks):
             else:
                 reprocess = True
 
-        # UNKNOWN_TRUCK: code → direct; free text → re-process
+        # ── UNKNOWN_TRUCK ─────────────────────────────────────────────────────
         elif q_type == "UNKNOWN_TRUCK":
-            if answer.lower().startswith("new:") or _looks_like_code(answer):
+            extracted = _extract_code_from_answer(answer)
+            if answer.lower().startswith("new:") or extracted:
+                _handle_unknown_truck_answer(conn, extracted or answer, context, event_id)
+            else:
+                reprocess = True
+
+        # ── UNRECOGNIZED_TRUCK (LLM proposed an ID not in DB) ─────────────────
+        elif q_type == "UNRECOGNIZED_TRUCK":
+            llm_truck_id = context.get("llm_truck_id", "")
+            truck_alias  = context.get("truck_alias", "")
+            if _is_affirmative(answer) and llm_truck_id:
+                # Operator confirms the LLM's suggested ID — register it
+                _register_new_truck(conn, llm_truck_id, llm_truck_id, [truck_alias], event_id)
+            elif answer.lower().startswith("new:"):
                 _handle_unknown_truck_answer(conn, answer, context, event_id)
             else:
-                reprocess = True
+                extracted = _extract_code_from_answer(answer)
+                if extracted:
+                    # Map the alias to an existing truck code
+                    _handle_unknown_truck_answer(conn, extracted, context, event_id)
+                else:
+                    reprocess = True
 
-        # UNKNOWN_SITE: code or new: → direct; free text → re-process
+        # ── UNKNOWN_SITE ──────────────────────────────────────────────────────
         elif q_type == "UNKNOWN_SITE":
-            if answer.lower().startswith("new:") or _looks_like_code(answer):
-                _handle_unknown_site_answer(conn, answer, context, event_id)
+            extracted = _extract_code_from_answer(answer)
+            if answer.lower().startswith("new:") or extracted:
+                _handle_unknown_site_answer(conn, extracted or answer, context, event_id)
             else:
                 reprocess = True
 
-        # CORRECTION_AMBIGUOUS: always re-process
+        # ── UNRECOGNIZED_SITE (LLM proposed an ID not in DB) ──────────────────
+        elif q_type == "UNRECOGNIZED_SITE":
+            llm_site_id = context.get("llm_site_id", "")
+            site_alias  = context.get("site_alias", "")
+            if _is_affirmative(answer) and llm_site_id:
+                _register_new_site(conn, llm_site_id, llm_site_id, "loading", [site_alias], event_id)
+            elif answer.lower().startswith("new:"):
+                _handle_unknown_site_answer(conn, answer, context, event_id)
+            else:
+                extracted = _extract_code_from_answer(answer)
+                if extracted:
+                    _handle_unknown_site_answer(conn, extracted, context, event_id)
+                else:
+                    reprocess = True
+
+        # ── CORRECTION_AMBIGUOUS: always re-process ───────────────────────────
         elif q_type == "CORRECTION_AMBIGUOUS":
             reprocess = True
 
         # Record the answer
         db.answer_question(conn, req.question_id, answer, req.answered_by)
 
-        # If re-processing: delete original held event so it gets replaced
+        # If re-processing: soft-delete original held event so it gets replaced
         if reprocess and event_id:
             conn.execute(
                 "UPDATE events SET commit_status='DELETED' WHERE event_id=? AND commit_status IN ('HELD','FLAGGED')",
@@ -204,12 +296,49 @@ async def answer_by_id(question_id: str, req: AnswerRequest, background_tasks: B
     return await submit_answer(req, background_tasks)
 
 
+def _register_new_truck(
+    conn, truck_id: str, display_name: str, aliases: list, event_id: Optional[str]
+):
+    """Insert a new truck row and commit the held event to use it."""
+    try:
+        db.create_truck(conn, truck_id.strip(), display_name.strip() or truck_id, aliases)
+    except Exception:
+        pass
+    if event_id:
+        conn.execute(
+            "UPDATE events SET truck_id=?, commit_status='COMMITTED', commit_path='manual' "
+            "WHERE event_id=? AND commit_status='HELD'",
+            (truck_id.strip(), event_id),
+        )
+
+
+def _register_new_site(
+    conn, site_id: str, display_name: str, site_type: str, aliases: list, event_id: Optional[str]
+):
+    """Insert a new site row and commit the held event to use it."""
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO sites (site_id, display_name, aliases, site_type) VALUES (?,?,?,?)",
+            (site_id.strip(), display_name.strip() or site_id,
+             json.dumps(aliases), site_type.strip() or "loading"),
+        )
+    except Exception:
+        pass
+    if event_id:
+        conn.execute(
+            "UPDATE events SET site_id=?, commit_status='COMMITTED', commit_path='manual' "
+            "WHERE event_id=? AND commit_status IN ('HELD','FLAGGED')",
+            (site_id.strip(), event_id),
+        )
+
+
 def _handle_unknown_truck_answer(conn, answer: str, context: dict, event_id: Optional[str]):
     """
     Parse answer and update trucks + held event.
-    Formats:
-      "TB" → add alias to existing truck TB
+    Accepts:
+      "TB"                           → add context alias to existing truck TB
       "new:TX:Truck X:alias1,alias2" → create new truck
+      extracted code (already done by caller via _extract_code_from_answer)
     """
     answer = answer.strip()
     if answer.lower().startswith("new:"):
@@ -217,35 +346,32 @@ def _handle_unknown_truck_answer(conn, answer: str, context: dict, event_id: Opt
         if len(parts) >= 4:
             _, truck_id, display_name, aliases_str = parts
             aliases = [a.strip() for a in aliases_str.split(",") if a.strip()]
-            try:
-                db.create_truck(conn, truck_id.strip(), display_name.strip(), aliases)
-            except Exception:
-                pass
-    else:
-        # answer is existing truck_id; add alias from context
-        truck_id = answer.strip()
-        truck_alias = context.get("truck_alias", "")
-        if truck_alias:
-            try:
-                db.add_truck_alias(conn, truck_id, truck_alias)
-            except Exception:
-                pass
+            _register_new_truck(conn, truck_id.strip(), display_name.strip(), aliases, event_id)
+        return
 
-    # Update the held event with resolved truck_id if event_id present
-    if event_id and answer:
-        resolved_id = answer.split(":")[1] if answer.lower().startswith("new:") else answer.strip()
+    # Treat answer as existing truck_id; add context alias to it
+    truck_id = answer.upper()
+    truck_alias = context.get("truck_alias") or context.get("llm_truck_id", "")
+    if truck_alias:
+        try:
+            db.add_truck_alias(conn, truck_id, truck_alias)
+        except Exception:
+            pass
+    if event_id:
         conn.execute(
-            "UPDATE events SET truck_id=?, commit_status='COMMITTED' WHERE event_id=? AND commit_status='HELD'",
-            (resolved_id, event_id),
+            "UPDATE events SET truck_id=?, commit_status='COMMITTED', commit_path='manual' "
+            "WHERE event_id=? AND commit_status='HELD'",
+            (truck_id, event_id),
         )
 
 
 def _handle_unknown_site_answer(conn, answer: str, context: dict, event_id: Optional[str]):
     """
     Parse answer and update sites + held event.
-    Formats:
-      "BG" → add alias to existing site BG
-      "new:SNAME:Display Name:loading:alias" → create new site
+    Accepts:
+      "SOC"                                    → add context alias to existing site SOC
+      "new:SNAME:Display Name:loading:alias"   → create new site
+      extracted code (already done by caller)
     """
     answer = answer.strip()
     if answer.lower().startswith("new:"):
@@ -253,26 +379,21 @@ def _handle_unknown_site_answer(conn, answer: str, context: dict, event_id: Opti
         if len(parts) >= 5:
             _, site_id, display_name, site_type, aliases_str = parts
             aliases = [a.strip() for a in aliases_str.split(",") if a.strip()]
-            try:
-                conn.execute(
-                    "INSERT OR IGNORE INTO sites (site_id, display_name, aliases, site_type) VALUES (?,?,?,?)",
-                    (site_id.strip(), display_name.strip(),
-                     json.dumps(aliases), site_type.strip()),
-                )
-            except Exception:
-                pass
-    else:
-        site_id = answer.strip()
-        site_alias = context.get("site_alias", "")
-        if site_alias:
-            try:
-                db.add_site_alias(conn, site_id, site_alias)
-            except Exception:
-                pass
+            _register_new_site(conn, site_id.strip(), display_name.strip(),
+                               site_type.strip(), aliases, event_id)
+        return
 
-    if event_id and answer:
-        resolved_id = answer.split(":")[1] if answer.lower().startswith("new:") else answer.strip()
+    # Treat answer as existing site_id; add context alias to it
+    site_id = answer.upper()
+    site_alias = context.get("site_alias") or context.get("llm_site_id", "")
+    if site_alias:
+        try:
+            db.add_site_alias(conn, site_id, site_alias)
+        except Exception:
+            pass
+    if event_id:
         conn.execute(
-            "UPDATE events SET site_id=?, commit_status='COMMITTED' WHERE event_id=? AND commit_status IN ('HELD','FLAGGED')",
-            (resolved_id, event_id),
+            "UPDATE events SET site_id=?, commit_status='COMMITTED', commit_path='manual' "
+            "WHERE event_id=? AND commit_status IN ('HELD','FLAGGED')",
+            (site_id, event_id),
         )

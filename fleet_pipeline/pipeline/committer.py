@@ -170,9 +170,26 @@ class Committer:
     ):
         events = level3_result.get("events", []) or []
 
-        # Expand events: inject inferred ENTER before LS/US when missing.
-        # Track (truck_id, site_id) pairs that already have an ENTER in this batch
-        # so we don't double-inject when the LLM also emitted an inferred ENTER (RULE 7b).
+        # Pre-validate all truck_id/site_id values in the LLM output once.
+        # Any ID not present in the DB is nulled out so downstream logic
+        # (inferred ENTER injection, _determine_commit_status, insert_event)
+        # never sees a non-existent FK value — which would raise a FK constraint error.
+        # Save the original LLM-proposed ID so we can ask the operator whether to
+        # register it or map it to an existing one (UNRECOGNIZED_* HITL questions).
+        _valid_trucks = {
+            r[0] for r in conn.execute("SELECT truck_id FROM trucks").fetchall()
+        }
+        _valid_sites = {
+            r[0] for r in conn.execute("SELECT site_id FROM sites").fetchall()
+        }
+        for ev in events:
+            if ev.get("truck_id") and ev["truck_id"] not in _valid_trucks:
+                ev["_orig_truck_id"] = ev["truck_id"]
+                ev["truck_id"] = None
+            if ev.get("site_id") and ev["site_id"] not in _valid_sites:
+                ev["_orig_site_id"] = ev["site_id"]
+                ev["site_id"] = None
+
         expanded = []
         enters_in_batch: set = set()
         for ev in events:
@@ -280,22 +297,41 @@ class Committer:
                 original_wa_message_id=self.wa_message_id,
                 group_jid=self.group_jid,
             )
+            ev_reasoning = ev.get("reasoning") or ""
+            orig_truck_id = ev.get("_orig_truck_id")  # LLM-proposed ID that wasn't in DB
+            orig_site_id = ev.get("_orig_site_id")
             for q_type, q_args in questions:
                 if q_type == "UNKNOWN_TRUCK":
-                    hitl.create_unknown_truck_question(
-                        conn, msg_id, event_id, truck_alias, raw_text,
-                        self.simulation_run_id, **wa_ctx
-                    )
+                    if orig_truck_id:
+                        # LLM suggested a specific ID — ask operator to confirm or redirect
+                        hitl.create_unrecognized_truck_question(
+                            conn, msg_id, event_id, orig_truck_id, truck_alias,
+                            ev_reasoning, raw_text, self.simulation_run_id, **wa_ctx
+                        )
+                    else:
+                        hitl.create_unknown_truck_question(
+                            conn, msg_id, event_id, truck_alias, raw_text,
+                            self.simulation_run_id, **wa_ctx,
+                            reasoning=ev_reasoning,
+                        )
                 elif q_type == "UNKNOWN_SITE":
-                    hitl.create_unknown_site_question(
-                        conn, msg_id, event_id, site_alias, raw_text,
-                        self.simulation_run_id, **wa_ctx
-                    )
+                    if orig_site_id:
+                        hitl.create_unrecognized_site_question(
+                            conn, msg_id, event_id, orig_site_id, site_alias,
+                            ev_reasoning, raw_text, self.simulation_run_id, **wa_ctx
+                        )
+                    else:
+                        hitl.create_unknown_site_question(
+                            conn, msg_id, event_id, site_alias, raw_text,
+                            self.simulation_run_id, **wa_ctx,
+                            reasoning=ev_reasoning,
+                        )
                 elif q_type == "LOW_CONFIDENCE":
                     parsed_summary = f"Truck {truck_alias} did {status} at {site_alias or site_id}"
                     hitl.create_low_confidence_question(
                         conn, msg_id, event_id, overall_confidence, parsed_summary,
-                        raw_text, self.simulation_run_id, **wa_ctx
+                        raw_text, self.simulation_run_id, **wa_ctx,
+                        reasoning=ev_reasoning,
                     )
                 summary["hitl_created"] += 1
 
