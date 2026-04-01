@@ -6,14 +6,19 @@ services:
     restart: unless-stopped
     volumes:
       - fleet_db:/data
+      - ./logs:/logs
     environment:
-      FLEET_DB_PATH:         /data/fleet.db
-      FLEET_LLM_BASE_URL:    ${FLEET_LLM_BASE_URL}
-      FLEET_LLM_API_KEY:     ${FLEET_LLM_API_KEY:-EMPTY}
-      FLEET_MODEL:           ${FLEET_MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ}
-      FLEET_LLM_MAX_TOKENS:  ${FLEET_LLM_MAX_TOKENS:-2048}
-      FLEET_LLM_MOCK:        ${FLEET_LLM_MOCK:-false}
-      WA_LISTENER_URL:       http://wa:3001
+      FLEET_DB_PATH:           /data/fleet.db
+      FLEET_LOGS_DIR:          /logs
+      FLEET_LLM_BASE_URL:      ${FLEET_LLM_BASE_URL}
+      FLEET_LLM_API_KEY:       ${FLEET_LLM_API_KEY:-EMPTY}
+      FLEET_MODEL:             ${FLEET_MODEL:-qwen3.5-9b}
+      FLEET_LLM_MAX_TOKENS:    ${FLEET_LLM_MAX_TOKENS:-4096}
+      FLEET_LLM_TIMEOUT:       ${FLEET_LLM_TIMEOUT:-120}
+      FLEET_LLM_TEMPERATURE:   ${FLEET_LLM_TEMPERATURE:-0.1}
+      FLEET_LLM_MOCK:          ${FLEET_LLM_MOCK:-false}
+      FLEET_AUTH_PASSWORD:     ${FLEET_AUTH_PASSWORD:-}
+      WA_LISTENER_URL:         http://wa:3001
     networks:
       - fleet_net
     healthcheck:
@@ -30,11 +35,13 @@ services:
     restart: unless-stopped
     volumes:
       - wa_session:/session
+      - ./logs:/logs
     environment:
       FLEET_API_URL:   http://api:8000
       WA_GROUP_JID:    ${WA_GROUP_JID}
       WA_HEALTH_PORT:  "3001"
       WA_SESSION_DIR:  /session
+      FLEET_LOGS_DIR:  /logs
       LOG_LEVEL:       ${LOG_LEVEL:-info}
     networks:
       - fleet_net

@@ -11,6 +11,8 @@ except ImportError:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("FLEET_DB_PATH", os.path.join(BASE_DIR, "data", "fleet.db"))
 PROMPT_TEMPLATE_PATH = os.path.join(BASE_DIR, "prompts", "level3_prompt_template.txt")
+# In Docker: /logs (bind-mounted to ./logs/ on the host). Locally: project root logs/.
+LOGS_DIR = os.environ.get("FLEET_LOGS_DIR", os.path.join(BASE_DIR, "..", "logs"))
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 # Three modes, controlled by env vars:

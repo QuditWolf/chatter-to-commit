@@ -279,6 +279,7 @@ class Committer:
                 "simulation_run_id": self.simulation_run_id,
                 "shift_id": ev_shift_id,
                 "commit_path": commit_path,
+                "wa_message_id": self.wa_message_id,
             })
 
             db.log_audit(conn, "INSERT", "events", event_id,

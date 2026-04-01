@@ -37,6 +37,26 @@ const SESSION_DIR  = process.env.WA_SESSION_DIR  || path.join(__dirname, "sessio
 const LOG_LEVEL    = process.env.LOG_LEVEL       || "info";
 const API_URL      = process.env.FLEET_API_URL   || "http://localhost:8000";
 const HEALTH_PORT  = parseInt(process.env.WA_HEALTH_PORT || "3001", 10);
+const LOGS_DIR     = process.env.FLEET_LOGS_DIR  || "/logs";
+
+// ── File logging — tee console.* to LOGS_DIR/wa.log ─────────────────────────
+
+let _logStream = null;
+try {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+    _logStream = fs.createWriteStream(path.join(LOGS_DIR, "wa.log"), { flags: "a" });
+} catch (_e) { /* can't open log file — stdout only */ }
+
+function _writeLine(level, args) {
+    const msg = args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+    const line = `${new Date().toISOString()} [${level}] ${msg}\n`;
+    process.stdout.write(line);
+    if (_logStream) _logStream.write(line);
+}
+
+console.log   = (...a) => _writeLine("INFO",  a);
+console.warn  = (...a) => _writeLine("WARN",  a);
+console.error = (...a) => _writeLine("ERROR", a);
 
 // ── Shift signal detection (mirrors Python Level2) ───────────────────────────
 
@@ -217,6 +237,7 @@ async function startListener() {
 
         const wa_message_id = msg.key.id || `${Date.now()}-${Math.random()}`;
         const sender_phone  = msg.key.participant || jid;
+        const sender_name   = msg.pushName || null;
         const received_at   = new Date(
           msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
         ).toISOString();
@@ -233,6 +254,7 @@ async function startListener() {
         const result = await postToAPI("/api/ingest/wa-message", {
           wa_message_id,
           sender_phone,
+          sender_name,
           group_jid:             jid,
           raw_text:              text,
           received_at,

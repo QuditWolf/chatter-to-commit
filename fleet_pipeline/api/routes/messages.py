@@ -38,6 +38,7 @@ class ManualCommitRequest(BaseModel):
     truck_id: str
     status: str
     site_id: str
+    msg_id: Optional[str] = None              # link to existing raw message
     timestamp_effective: Optional[str] = None  # ISO8601; defaults to now
     note: Optional[str] = None
     created_by: Optional[str] = "operator"
@@ -348,7 +349,6 @@ async def create_manual_commit(req: ManualCommitRequest):
 
     now = datetime.now(timezone.utc).isoformat()
     event_id = str(uuid4())
-    ts = req.timestamp_effective or now
 
     with db.db_conn(DB_PATH) as conn:
         # Verify truck and site exist
@@ -358,6 +358,18 @@ async def create_manual_commit(req: ManualCommitRequest):
         site = conn.execute("SELECT site_id FROM sites WHERE site_id=?", (req.site_id,)).fetchone()
         if not site:
             raise HTTPException(status_code=400, detail=f"Unknown site_id: {req.site_id}")
+
+        # If msg_id provided, verify it exists and optionally borrow its timestamp
+        linked_msg_id = None
+        if req.msg_id:
+            msg_row = conn.execute(
+                "SELECT msg_id, timestamp_iso FROM raw_messages WHERE msg_id=?", (req.msg_id,)
+            ).fetchone()
+            if not msg_row:
+                raise HTTPException(status_code=404, detail=f"Message not found: {req.msg_id}")
+            linked_msg_id = msg_row["msg_id"]
+
+        ts = req.timestamp_effective or now
 
         # Get shift for this timestamp
         shift_row = conn.execute(
@@ -383,7 +395,7 @@ async def create_manual_commit(req: ManualCommitRequest):
 
         db.insert_event(conn, {
             "event_id": event_id,
-            "msg_id": None,
+            "msg_id": linked_msg_id,
             "truck_id": req.truck_id,
             "truck_alias": truck_alias,
             "status": req.status,

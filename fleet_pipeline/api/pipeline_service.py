@@ -9,6 +9,7 @@ even if the LLM endpoint is not yet reachable.
 """
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
@@ -16,6 +17,7 @@ from uuid import uuid4
 log = logging.getLogger(__name__)
 
 from fleet_pipeline.config import DB_PATH, LLM_MOCK
+from fleet_pipeline.audit import audit
 from fleet_pipeline.db import database as db
 from fleet_pipeline.pipeline.level1 import parse_timestamp
 from fleet_pipeline.pipeline.level2 import Enricher, EnricherConfig
@@ -75,6 +77,8 @@ def process_raw_text(
                    stored on HITL questions for reply routing.
     group_jid:     WA group JID to send bot HITL clarification messages to.
     """
+    _t_start = time.monotonic()
+
     if timestamp_iso is None:
         timestamp_iso = datetime.now(timezone.utc).astimezone(
             __import__("pytz").timezone("Asia/Kolkata")
@@ -115,12 +119,17 @@ def process_raw_text(
 
     # Level 3 — LLM inference
     llm_error = None
+    l3_prompt = None
+    l3_raw_output = None
     processor = _get_processor()
     try:
         result = processor.process_message(
             level2_msg, truck_registry, site_registry, l3_history,
             operator_clarification=operator_clarification,
         )
+        # Pop audit fields before passing result to committer
+        l3_prompt = result.pop("_l3_prompt", None)
+        l3_raw_output = result.pop("_l3_raw_output", None)
     except Exception as exc:
         llm_error = f"{type(exc).__name__}: {str(exc)[:200]}"
         log.warning("L3 inference failed for msg %s: %s", msg_id, llm_error)
@@ -196,5 +205,39 @@ def process_raw_text(
             notify_hitl_questions(questions, group_jid, DB_PATH)
         except Exception as _exc:
             log.warning("WA HITL notification failed: %s", _exc)
+
+    audit({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "msg_id": msg_id,
+        "wa_message_id": wa_message_id,
+        "sender": sender_name,
+        "sender_id": sender_id,
+        "raw_text": raw_text,
+        "l2": {
+            "candidate_msg_type": level2_msg.get("candidate_msg_type"),
+            "rough_trucks": level2_msg.get("rough_trucks", []),
+            "rough_sites": level2_msg.get("rough_sites", []),
+            "rough_status_keywords": level2_msg.get("rough_status_keywords", []),
+            "lang": level2_msg.get("lang"),
+        },
+        "l3": {
+            "prompt": l3_prompt,
+            "raw_output": l3_raw_output,
+            "msg_type": result.get("msg_type"),
+            "overall_confidence": result.get("overall_confidence"),
+            "commit_recommendation": result.get("commit_recommendation"),
+            "events_parsed": len(result.get("events", [])),
+        },
+        "commit": {
+            "committed": summary.get("committed", 0),
+            "flagged": summary.get("flagged", 0),
+            "held": summary.get("held", 0),
+            "noise": summary.get("noise", 0),
+            "hitl_created": summary.get("hitl_created", 0),
+            "events": summary.get("events", []),
+        },
+        "error": summary.get("llm_error"),
+        "duration_ms": round((time.monotonic() - _t_start) * 1000),
+    })
 
     return summary

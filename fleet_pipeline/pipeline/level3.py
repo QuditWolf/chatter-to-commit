@@ -92,8 +92,10 @@ def build_prompt(template_text: str, prompt_obj: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def strip_markdown_fences(text: str) -> str:
-    """Strip ```json ... ``` wrapper that Qwen wraps its output in."""
+    """Strip ```json ... ``` wrapper and <think>...</think> blocks from LLM output."""
     text = text.strip()
+    # Remove <think>...</think> blocks (GLM thinking model sometimes leaks these into content)
+    text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL).strip()
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"\n?```\s*$", "", text.strip())
@@ -103,7 +105,8 @@ def strip_markdown_fences(text: str) -> str:
 def parse_llm_output(raw_text: str) -> Dict[str, Any]:
     """
     Parse the raw LLM output string into a dict.
-    Handles markdown fences. Returns an error dict on failure.
+    Handles markdown fences, <think> blocks, and embedded JSON.
+    Returns an error dict on failure.
     """
     if not raw_text:
         return {"msg_type": "ERROR", "events": [], "error": "No output from model", "raw_llm_output": ""}
@@ -111,11 +114,19 @@ def parse_llm_output(raw_text: str) -> Dict[str, Any]:
     cleaned = strip_markdown_fences(raw_text)
     try:
         return json.loads(cleaned)
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
+        # Fallback: try to find the first complete {...} JSON object in the text.
+        # Handles cases where the model wraps the JSON in prose.
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
         return {
             "msg_type": "ERROR",
             "events": [],
-            "error": f"JSON parse failed: {e}",
+            "error": f"JSON parse failed — could not extract JSON from model output",
             "raw_llm_output": raw_text,
         }
 
@@ -215,14 +226,20 @@ class Level3Processor:
             # The startup warmup in main.py handles the common case.
             # This 1-retry is a safety net for any residual empty-content responses.
             raw_output = None
+            messages = [
+                {"role": "user", "content": prompt_text},
+            ]
             for attempt in range(2):
                 retry_temp = min(LLM_TEMPERATURE + attempt * 0.3, 1.0)
                 try:
                     resp = self._openai.chat.completions.create(
                         model=self.model_name,
-                        messages=[{"role": "user", "content": prompt_text}],
+                        messages=messages,
                         temperature=retry_temp,
                         max_tokens=LLM_MAX_TOKENS,
+                        extra_body={
+                            "chat_template_kwargs": {"enable_thinking": False},
+                        },
                     )
                     msg = resp.choices[0].message
                     raw_output = (msg.content or "").strip()
@@ -230,10 +247,8 @@ class Level3Processor:
                         if attempt > 0:
                             print(f"[Level3] Retry {attempt} succeeded (temp={retry_temp:.1f})", file=sys.stderr)
                         break
-                    reasoning = getattr(msg, "reasoning_content", None) or ""
                     print(
                         f"[Level3] Attempt {attempt+1}: content empty"
-                        + (f", reasoning len={len(reasoning)}" if reasoning else "")
                         + (f" — retrying temp={retry_temp+0.3:.1f}" if attempt == 0 else ""),
                         file=sys.stderr,
                     )
@@ -254,6 +269,9 @@ class Level3Processor:
         parsed["raw_message"] = prompt_obj["raw"]
         parsed["level2_meta"] = prompt_obj["l2_meta"]
         parsed["processing_id"] = str(uuid4())
+        # Debug fields for audit log — pipeline_service pops these before committing
+        parsed["_l3_prompt"] = prompt_text
+        parsed["_l3_raw_output"] = raw_output or ""
 
         return parsed
 

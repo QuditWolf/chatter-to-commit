@@ -1321,82 +1321,104 @@ async function loadMessages() {
 
     document.getElementById('msg-map-body').innerHTML = '';
     document.getElementById('msg-map-body').innerHTML = d.items.map(item => {
-      const conf = item.confidence;
-      const barW = conf ? Math.round(conf*100) : 0;
-      const barColor = conf ? confColor(conf) : '#aaa';
-      const dotCls = conf ? confDotClass(conf) : 'gray';
-      const statusStr = item.commit_status;
-      const isNoise = statusStr === 'NOISE';
-      const isUnmapped = item.event_id && statusStr === 'HELD' && !item.truck_id;
-      const correctBtn = item.event_id ? `<button class="correct-btn" onclick='openCorrectPanel(${JSON.stringify({event_id:item.event_id,raw:item.raw_text,truck:item.truck_alias||item.truck_id,status:item.status,site:item.site_alias||item.site_id,shift:item.shift_id})})'>Correct</button>` : '';
-      const commitBtn = (statusStr==='FLAGGED'||statusStr==='HELD') && item.truck_id ? `<button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none" onclick="forceCommit('${item.event_id}')">Commit</button>` : '';
-      const rellmBtn = item.event_id && (statusStr==='FLAGGED'||statusStr==='HELD') ? `<button class="correct-btn" id="retry-btn-${item.event_id}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLM('${item.event_id}')">↺ Re-LLM</button>` : '';
-      const reasoningHtml = item.reasoning ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:4px;line-height:1.4;max-width:280px">${escHtml(item.reasoning)}</div>` : '';
+      const events = item.events || [];
+      const msgId  = item.msg_id;
 
+      // Build right-side HTML: one block per event + add-commit button
       let rightHtml = '';
-      if(isNoise) {
-        // LLM classified as non-fleet message — show classification details
-        rightHtml = `
-          <div class="commit-status">
-            <span class="dot gray"></span>
-            <span style="font-size:11px;color:var(--color-text-secondary)">${item.status||'NOISE'}${conf?' · conf '+conf.toFixed(2):''}</span>
-          </div>
-          ${reasoningHtml}`;
-      } else if(isUnmapped) {
-        // LLM failed or couldn't identify truck — show manual map form
-        rightHtml = `
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-            <span style="font-size:11px;color:var(--color-text-danger);font-weight:500">⚠ Not mapped — LLM was offline</span>
-            <button class="correct-btn" id="retry-btn-${item.event_id}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLM('${item.event_id}')">↺ Retry with LLM</button>
-            <span id="retry-msg-${item.event_id}" style="font-size:11px;color:var(--color-text-secondary)"></span>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:6px">
-            <select id="map-truck-${item.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
-              <option value="">Trolley…</option>
-              ${(S.trucks||[]).map(t=>`<option value="${escAttr(t.truck_id)}">${escHtml(t.display_name||t.truck_id)}</option>`).join('')}
-            </select>
-            <select id="map-status-${item.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
-              <option value="">Status…</option>
-              <option value="ENTER">Arrived</option>
-              <option value="LS">Loading started</option>
-              <option value="LO">Loading over</option>
-              <option value="LEFT">Left site</option>
-              <option value="US">Unloading started</option>
-              <option value="UO">Unloading over</option>
-            </select>
-            <select id="map-site-${item.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
-              <option value="">Site…</option>
-              ${(S.sites||[]).map(s=>`<option value="${escAttr(s.site_id)}">${escHtml(s.display_name||s.site_id)}</option>`).join('')}
-            </select>
-          </div>
-          <button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none;padding:4px 12px" onclick="submitMap('${item.event_id}')">Commit manually</button>
-          <span id="map-msg-${item.event_id}" style="font-size:11px;margin-left:8px;color:var(--color-text-secondary)"></span>`;
-      } else if(item.event_id) {
-        rightHtml = `
-          <div class="parsed-fields">
-            <div class="field-row"><span class="field-key">Trolley</span><span class="field-val">${item.truck_alias||item.truck_id||'?'}</span></div>
-            <div class="field-row"><span class="field-key">Status</span><span class="field-val">${statusLabel(item.status)}</span></div>
-            <div class="field-row"><span class="field-key">Site</span><span class="field-val">${item.site_name||item.site_alias||item.site_id||'–'}</span></div>
-          </div>
-          <div class="commit-status">
-            <span class="dot ${dotCls}"></span>
-            <span style="font-size:11px;color:var(--color-text-secondary)">${statusStr||'–'}${conf?' · conf '+conf.toFixed(2):''}</span>
-            ${rellmBtn} ${commitBtn} ${correctBtn}
-          </div>
-          ${reasoningHtml}
-          <div class="conf-bar-wrap"><div class="conf-bar" style="width:${barW}%;background:${barColor}"></div></div>`;
-      } else {
+
+      if (!events.length) {
+        // No events at all — message not yet parsed or ingestion failed
         rightHtml = `<div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--color-text-secondary)">
-          No commit — ${statusStr||'unparsed'}
-          ${item.msg_id ? `<button class="correct-btn" id="retry-msg-btn-${item.msg_id}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLMByMsg('${item.msg_id}')">↺ Re-LLM</button><span id="retry-msg-msg-${item.msg_id}" style="font-size:11px;color:var(--color-text-secondary)"></span>` : ''}
+          No commit — unparsed
+          ${msgId ? `<button class="correct-btn" id="retry-msg-btn-${msgId}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLMByMsg('${msgId}')">↺ Re-LLM</button><span id="retry-msg-msg-${msgId}"></span>` : ''}
         </div>`;
+      } else {
+        // Render each event as a compact row
+        const eventBlocks = events.map(ev => {
+          const conf     = ev.confidence;
+          const barW     = conf ? Math.round(conf * 100) : 0;
+          const barColor = conf ? confColor(conf) : '#aaa';
+          const dotCls   = conf ? confDotClass(conf) : 'gray';
+          const statusStr = ev.commit_status;
+          const isNoise   = statusStr === 'NOISE';
+          const isUnmapped = ev.event_id && statusStr === 'HELD' && !ev.truck_id;
+
+          if (isNoise) {
+            return `<div style="padding:4px 0;border-bottom:0.5px solid var(--color-border-tertiary)">
+              <div class="commit-status">
+                <span class="dot gray"></span>
+                <span style="font-size:11px;color:var(--color-text-secondary)">${ev.status||'NOISE'}${conf?' · conf '+conf.toFixed(2):''}</span>
+              </div>
+              ${ev.reasoning ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:2px">${escHtml(ev.reasoning)}</div>` : ''}
+            </div>`;
+          }
+
+          if (isUnmapped) {
+            return `<div style="padding:4px 0;border-bottom:0.5px solid var(--color-border-tertiary)">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                <span style="font-size:11px;color:var(--color-text-danger);font-weight:500">⚠ Not mapped</span>
+                <button class="correct-btn" id="retry-btn-${ev.event_id}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLM('${ev.event_id}')">↺ Retry with LLM</button>
+                <span id="retry-msg-${ev.event_id}" style="font-size:11px;color:var(--color-text-secondary)"></span>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:6px">
+                <select id="map-truck-${ev.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+                  <option value="">Trolley…</option>
+                  ${(S.trucks||[]).map(t=>`<option value="${escAttr(t.truck_id)}">${escHtml(t.display_name||t.truck_id)}</option>`).join('')}
+                </select>
+                <select id="map-status-${ev.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+                  <option value="">Status…</option>
+                  <option value="ENTER">Arrived</option><option value="LS">Loading started</option>
+                  <option value="LO">Loading over</option><option value="LEFT">Left site</option>
+                  <option value="US">Unloading started</option><option value="UO">Unloading over</option>
+                </select>
+                <select id="map-site-${ev.event_id}" style="padding:4px 6px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+                  <option value="">Site…</option>
+                  ${(S.sites||[]).map(s=>`<option value="${escAttr(s.site_id)}">${escHtml(s.display_name||s.site_id)}</option>`).join('')}
+                </select>
+              </div>
+              <button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none;padding:4px 12px" onclick="submitMap('${ev.event_id}')">Commit manually</button>
+              <span id="map-msg-${ev.event_id}" style="font-size:11px;margin-left:8px;color:var(--color-text-secondary)"></span>
+            </div>`;
+          }
+
+          // Normal committed/flagged/held event
+          const correctBtn = `<button class="correct-btn" onclick='openCorrectPanel(${JSON.stringify({event_id:ev.event_id,raw:item.raw_text,truck:ev.truck_alias||ev.truck_id,status:ev.status,site:ev.site_alias||ev.site_id,shift:ev.shift_id})})'>Correct</button>`;
+          const commitBtn  = (statusStr==='FLAGGED'||statusStr==='HELD') && ev.truck_id
+            ? `<button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none" onclick="forceCommit('${ev.event_id}')">Commit</button>` : '';
+          const rellmBtn   = ev.event_id && (statusStr==='FLAGGED'||statusStr==='HELD')
+            ? `<button class="correct-btn" id="retry-btn-${ev.event_id}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLM('${ev.event_id}')">↺ Re-LLM</button>` : '';
+
+          return `<div style="padding:4px 0;border-bottom:0.5px solid var(--color-border-tertiary)">
+            <div class="parsed-fields">
+              <div class="field-row"><span class="field-key">Trolley</span><span class="field-val">${escHtml(ev.truck_alias||ev.truck_id||'?')}</span></div>
+              <div class="field-row"><span class="field-key">Status</span><span class="field-val">${statusLabel(ev.status)}</span></div>
+              <div class="field-row"><span class="field-key">Site</span><span class="field-val">${escHtml(ev.site_name||ev.site_alias||ev.site_id||'–')}</span></div>
+            </div>
+            <div class="commit-status">
+              <span class="dot ${dotCls}"></span>
+              <span style="font-size:11px;color:var(--color-text-secondary)">${statusStr||'–'}${conf?' · conf '+conf.toFixed(2):''}</span>
+              ${rellmBtn} ${commitBtn} ${correctBtn}
+            </div>
+            ${ev.reasoning ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:2px;line-height:1.4">${escHtml(ev.reasoning)}</div>` : ''}
+            <div class="conf-bar-wrap"><div class="conf-bar" style="width:${barW}%;background:${barColor}"></div></div>
+          </div>`;
+        }).join('');
+
+        rightHtml = eventBlocks;
       }
-      return `<div class="msg-row" id="msg-row-${item.event_id||''}">
+
+      // "+ Add commit" button always shown at the bottom of the right column
+      const addBtn = msgId
+        ? `<div style="margin-top:6px"><button class="correct-btn" style="font-size:11px;padding:2px 10px" onclick="openAddCommit('${msgId}')">+ Add commit</button></div>`
+        : '';
+
+      return `<div class="msg-row" id="msg-row-${msgId||''}">
         <div>
           <div class="raw-msg">${escHtml(item.raw_text||'')}</div>
-          <div class="msg-meta">${item.sender_name||item.sender_id||''} · ${fmtTime(item.timestamp_iso)}</div>
+          <div class="msg-meta">${escHtml(item.sender_name||item.sender_id||'')} · ${fmtTime(item.timestamp_iso)}</div>
         </div>
-        <div>${rightHtml}</div>
+        <div>${rightHtml}${addBtn}</div>
       </div>`;
     }).join('');
     // Prepend any currently-processing messages above DB results
@@ -1718,7 +1740,7 @@ async function loadCommits() {
 }
 
 // ── Commit modal (add / edit) ─────────────────────────────────────────────
-const CM = { mode: 'add', eventId: null };
+const CM = { mode: 'add', eventId: null, msgId: null };
 
 function _populateModalSelects() {
   const tSel = document.getElementById('cm-truck');
@@ -1731,9 +1753,10 @@ function _populateModalSelects() {
   }
 }
 
-function openAddCommit() {
-  CM.mode = 'add'; CM.eventId = null;
-  document.getElementById('commit-modal-title').textContent = 'Add commit';
+function openAddCommit(msgId) {
+  CM.mode = 'add'; CM.eventId = null; CM.msgId = msgId || null;
+  document.getElementById('commit-modal-title').textContent =
+    msgId ? 'Add commit to message' : 'Add commit';
   document.getElementById('cm-save-btn').textContent = 'Add';
   _populateModalSelects();
   document.getElementById('cm-ts').value = '';
@@ -1790,7 +1813,12 @@ async function saveCommitModal() {
     if (CM.mode === 'add') {
       await API('/api/commits', {
         method: 'POST',
-        body: JSON.stringify({ truck_id, status, site_id, timestamp_effective: ts, note: note||null }),
+        body: JSON.stringify({
+          truck_id, status, site_id,
+          timestamp_effective: ts,
+          note: note || null,
+          ...(CM.msgId ? { msg_id: CM.msgId } : {}),
+        }),
       });
     } else {
       const body = {};
@@ -1806,6 +1834,7 @@ async function saveCommitModal() {
     }
     closeCommitModal();
     loadCommits();
+    if (CM.msgId) loadMessages();  // refresh messages panel when added to a message
   } catch(e) {
     errEl.textContent = e.message;
     errEl.style.display = 'block';

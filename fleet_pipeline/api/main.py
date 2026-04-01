@@ -10,8 +10,10 @@ Or:
 import asyncio
 import json
 import logging
-import sys
 import os
+import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Set
 
 # Ensure project root is on path when run directly
@@ -37,42 +39,36 @@ from fleet_pipeline.api.routes import ingest as ingest_route
 from fleet_pipeline.api.routes import status as status_route
 from fleet_pipeline.api.agent_query import agent_answer
 
+def _setup_file_logging() -> None:
+    """Add a rotating file handler to all relevant loggers so logs land in LOGS_DIR/api.log."""
+    from fleet_pipeline.config import LOGS_DIR
+    logs_dir = Path(LOGS_DIR)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        logs_dir / "api.log",
+        maxBytes=20 * 1024 * 1024,   # 20 MB per file
+        backupCount=5,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    ))
+    # Root logger catches fleet_pipeline.* and anything else not listed below
+    logging.getLogger().addHandler(handler)
+    # Uvicorn writes access + error logs through these named loggers
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        logging.getLogger(name).addHandler(handler)
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """Run migrations once at startup, then warm up the LLM KV cache.
-
-    GLM-4.7-Flash has a cold-cache issue where the first ~3 calls return
-    empty content (model stops after </think> without generating JSON).
-    Sending a warmup call at startup primes the KV cache so real traffic
-    works immediately. The warmup result is discarded.
-    """
+    """Configure file logging and run DB migrations on startup."""
+    _setup_file_logging()
     from fleet_pipeline.db.migrate import run_migrations
     from fleet_pipeline.config import DB_PATH as _DB_PATH
     run_migrations(_DB_PATH)
-
-    if not LLM_MOCK and LLM_BASE_URL:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, _llm_warmup)
     yield
-
-
-def _llm_warmup():
-    """Blocking warmup — runs in thread so it doesn't delay startup."""
-    import logging
-    log = logging.getLogger(__name__)
-    try:
-        from fleet_pipeline.api.pipeline_service import process_raw_text
-        process_raw_text(
-            raw_text="warmup",
-            sender_name="system",
-            sender_id="warmup",
-            source="warmup",
-        )
-        log.info("[Startup] LLM warmup complete")
-    except Exception as exc:
-        # Warmup failure is expected (model may return nothing useful) — ignore
-        log.info("[Startup] LLM warmup done (result discarded): %s", exc)
 
 
 app = FastAPI(

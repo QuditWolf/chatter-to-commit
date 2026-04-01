@@ -25,6 +25,7 @@ _llm_semaphore = asyncio.Semaphore(1)
 class WAMessageRequest(BaseModel):
     wa_message_id: str
     sender_phone: str
+    sender_name: Optional[str] = None  # WhatsApp display name (pushName); falls back to sender_phone
     group_jid: str
     raw_text: str
     received_at: str           # ISO string from Node
@@ -153,7 +154,7 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
     background_tasks.add_task(
         _process_and_broadcast,
         raw_text=req.raw_text,
-        sender_name=req.sender_phone,
+        sender_name=req.sender_name or req.sender_phone,
         sender_id=req.sender_phone,
         timestamp_iso=req.received_at,
         source="whatsapp",

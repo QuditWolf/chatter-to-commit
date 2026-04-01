@@ -533,13 +533,20 @@ def get_messages_page(
     search: str = "",
     hide_noise: bool = False,
 ) -> Dict[str, Any]:
-    """Paginated message-to-commit map using keyset pagination over raw_messages."""
+    """
+    Paginated message list. Returns one item per raw_message with all linked
+    events nested under an 'events' key (may be an empty list).
+    """
     offset = (page - 1) * limit
-    where_clauses = []
+    where_clauses: list = []
     params: list = []
 
     if hide_noise:
-        where_clauses.append("(e.commit_status != 'NOISE' OR e.commit_status IS NULL)")
+        # Exclude messages whose only events are NOISE (messages with no events pass through)
+        where_clauses.append(
+            "(NOT EXISTS (SELECT 1 FROM events e WHERE e.msg_id = r.msg_id)"
+            " OR EXISTS (SELECT 1 FROM events e WHERE e.msg_id = r.msg_id AND e.commit_status != 'NOISE'))"
+        )
 
     if status_filter != "all":
         status_map = {
@@ -550,49 +557,79 @@ def get_messages_page(
         }
         db_status = status_map.get(status_filter.lower())
         if db_status:
-            where_clauses.append("e.commit_status = ?")
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM events e WHERE e.msg_id = r.msg_id AND e.commit_status = ?)"
+            )
             params.append(db_status)
 
     if search:
-        where_clauses.append(
-            "(r.raw_text LIKE ? OR e.truck_id LIKE ? OR e.site_id LIKE ?)"
-        )
         like = f"%{search}%"
+        where_clauses.append(
+            "(r.raw_text LIKE ?"
+            " OR EXISTS (SELECT 1 FROM events e WHERE e.msg_id = r.msg_id"
+            "            AND (e.truck_id LIKE ? OR e.site_id LIKE ?)))"
+        )
         params.extend([like, like, like])
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    # Count total
-    count_sql = f"""
-        SELECT COUNT(*) FROM raw_messages r
-        LEFT JOIN events e ON e.msg_id = r.msg_id
-        {where_sql}
-    """
-    total = conn.execute(count_sql, params).fetchone()[0]
+    # Count distinct messages
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM raw_messages r {where_sql}", params
+    ).fetchone()[0]
 
-    # Fetch page
-    rows = conn.execute(
-        f"""SELECT r.msg_id, r.timestamp_iso, r.sender_name, r.sender_id, r.raw_text,
-               e.event_id, e.truck_id, e.truck_alias, e.status, e.site_id, e.site_alias,
-               e.confidence, e.commit_status, e.commit_path, e.corrected, e.inferred,
-               e.reasoning, e.shift_id, e.wa_message_id,
-               t.display_name as truck_name, s.display_name as site_name
-            FROM raw_messages r
-            LEFT JOIN events e ON e.msg_id = r.msg_id
-            LEFT JOIN trucks t ON e.truck_id = t.truck_id
-            LEFT JOIN sites s ON e.site_id = s.site_id
-            {where_sql}
-            ORDER BY r.timestamp_iso DESC, e.timestamp_effective ASC
+    # Fetch message rows for this page (one row per message)
+    msg_rows = conn.execute(
+        f"""SELECT r.msg_id, r.timestamp_iso, r.sender_name, r.sender_id, r.raw_text
+            FROM raw_messages r {where_sql}
+            ORDER BY r.timestamp_iso DESC
             LIMIT ? OFFSET ?""",
         params + [limit, offset],
     ).fetchall()
+
+    if not msg_rows:
+        return {
+            "total": total, "page": page, "limit": limit,
+            "pages": max(1, (total + limit - 1) // limit), "items": [],
+        }
+
+    msg_ids = [r["msg_id"] for r in msg_rows]
+    placeholders = ",".join("?" * len(msg_ids))
+
+    # Fetch all events for these messages in one query
+    event_rows = conn.execute(
+        f"""SELECT e.event_id, e.msg_id, e.truck_id, e.truck_alias, e.status,
+                   e.site_id, e.site_alias, e.confidence, e.commit_status,
+                   e.commit_path, e.corrected, e.inferred, e.reasoning,
+                   e.shift_id, e.wa_message_id, e.timestamp_effective,
+                   t.display_name AS truck_name, s.display_name AS site_name
+            FROM events e
+            LEFT JOIN trucks t ON t.truck_id = e.truck_id
+            LEFT JOIN sites  s ON s.site_id  = e.site_id
+            WHERE e.msg_id IN ({placeholders})
+            ORDER BY e.timestamp_effective ASC, e.created_at ASC""",
+        msg_ids,
+    ).fetchall()
+
+    events_by_msg: Dict[str, list] = {}
+    for ev in event_rows:
+        mid = ev["msg_id"]
+        if mid not in events_by_msg:
+            events_by_msg[mid] = []
+        events_by_msg[mid].append(dict(ev))
+
+    items = []
+    for r in msg_rows:
+        d = dict(r)
+        d["events"] = events_by_msg.get(d["msg_id"], [])
+        items.append(d)
 
     return {
         "total": total,
         "page": page,
         "limit": limit,
         "pages": max(1, (total + limit - 1) // limit),
-        "items": [dict(r) for r in rows],
+        "items": items,
     }
 
 

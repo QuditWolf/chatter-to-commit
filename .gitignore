@@ -42,7 +42,8 @@ session/*
 !session/.gitkeep
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
-logs/
+logs/*
+!logs/.gitkeep
 *.log
 
 # ── PM2 ───────────────────────────────────────────────────────────────────────
@@ -69,3 +70,6 @@ _archive/
 docs/harden_production_spec.md
 #reset_data.py
 verify_pending.py
+
+CLAUDE.md
+todo
