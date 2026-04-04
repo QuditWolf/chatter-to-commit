@@ -228,7 +228,91 @@ Do not refactor these unless a bug is found:
 | 2026-03-31 | Docker, better README, LLM error handling, dashboard status fixes, processing animation |
 | 2026-04-03 | Switched to Qwen2.5-32B; site inference from sender/shift; auto-end shift; VALID_STATUSES guard; LLM output normalization + partial/flat-JSON recovery |
 | 2026-04-04 | Prompt rewrite (14 rules, 14+ examples, PROHIBITIONS block); committer normalization; stale KV-cache bug found + fixed (`--no-cache-prompt`); tallies changed to audit-only |
-| 2026-04-05 | Reply-to-context feature; auto-post shift summary; admin edit/delete for trucks/sites; LLM quality regression test (all issues resolved); Docker deployment config fixed |
+| 2026-04-05 AM | Reply-to-context feature; auto-post shift summary; admin edit/delete; LLM quality regression test (all issues resolved); Docker deployment config fixed |
+| 2026-04-05 PM | LLM injection sanitizer; audit hardening; comprehensive sequential test (12 msgs, 44/44 passed); full code audit; 6 bugs fixed (WA_GROUP_JID, delete_site crash, schema drift, dead code, reprocess semaphore, MODEL_NAME import); flows_and_features.md created |
+| 2026-04-05 PM | Registry populated with 17 trucks + 9 sites from real chat data; frontend E2E 40/40 passed |
+
+---
+
+## Full Audit Report — Bugs Found & Fixed (2026-04-05 PM)
+
+### CRITICAL Bugs Fixed
+
+| # | Bug | File | Fix |
+|---|-----|------|-----|
+| 1 | `WA_GROUP_JID` not defined in config.py → ImportError on shift end | `config.py` | Added `WA_GROUP_JID = os.environ.get("WA_GROUP_JID", "")` |
+| 2 | `delete_site()` crashes on `tallies.site_id` (column doesn't exist) | `registry.py` | Removed tallies dependency check — tallies don't reference sites |
+
+### MODERATE Bugs Fixed
+
+| # | Bug | File | Fix |
+|---|-----|------|-----|
+| 3 | schema.sql missing 5 migration columns on events table | `schema.sql` | Added `wa_message_id`, `commit_path`, `corrected`, `corrected_at`, `shift_id` |
+| 4 | schema.sql missing `shift_name` on shifts table | `schema.sql` | Added column |
+
+### LOW Bugs Fixed
+
+| # | Bug | File | Fix |
+|---|-----|------|-----|
+| 5 | Dead unreachable code in `level2.py` `_get_reply_context()` (lines 257-268) | `level2.py` | Removed dead return block |
+| 6 | Reprocess endpoints bypass LLM semaphore → concurrent LLM calls break context ordering | `ingest.py` | Added `async with _llm_semaphore` to all 3 reprocess endpoints |
+| 7 | `MODEL_NAME` not imported in `pipeline_service.py` → NameError on LLM archive | `pipeline_service.py` | Added `MODEL_NAME` to import |
+
+### Docker/Deployment Fixes
+
+| # | Issue | File | Fix |
+|---|-------|------|-----|
+| 8 | docker-compose.yml defaults wrong for Qwen2.5-32B | `docker-compose.yml` | Updated `FLEET_MODEL`, `FLEET_LLM_MAX_TOKENS=1200` |
+| 9 | .env missing critical variables | `.env` | Added `HOST_PORT`, `FLEET_LLM_API_KEY`, `FLEET_LLM_MOCK`, `FLEET_AUTH_PASSWORD`, `LOG_LEVEL` |
+| 10 | .env.example outdated | `.env.example` | Updated model name, max tokens, improved comments |
+| 11 | Makefile `reset-wa-session` fragile grep | `Makefile` | Use explicit volume name |
+
+### Test Results
+
+| Test | Messages | Passed | Failed | Avg Latency |
+|------|----------|--------|--------|-------------|
+| LLM Regression | 10 | 10 | 0 | 9.5s |
+| Comprehensive | 12 | 12 (44 checks) | 0 | 8.9s |
+| Frontend E2E | 40 checks | 40 | 0 | — |
+
+---
+
+## LLM Injection Sanitizer (NEW — 2026-04-05 PM)
+
+Created `fleet_pipeline/pipeline/sanitizer.py` — defensive layer between LLM and database.
+
+**Blocks:**
+- Prompt injection: `ignore previous`, `you are now`, `act as`, `new instruction`, `system:`, `admin:`
+- SQL injection: `DROP TABLE`, `DELETE FROM`, `UNION SELECT`, `;--`, `/*`
+- Schema manipulation: `ALTER TABLE`, `CREATE TABLE`, `PRAGMA`
+- Data exfiltration: `SELECT * FROM`, `dump all`, `export data`
+
+**Validates:**
+- All event fields against whitelists (status, msg_type, commit_rec)
+- Length limits on all text fields (reasoning ≤200, notes ≤500, etc.)
+- Dangerous characters (`;`, `'`, `--`, `/*`, `\x`, `\u00`)
+- Confidence clamped to [0, 1]
+- Max 10 events per response
+
+**Severity levels:** `block` (reject entirely), `warn` (fix + log), `info` (log only)
+
+**Archive:** All LLM outputs stored in `llm_outputs` table with raw text, parsed JSON, sanitizer issues, model name, prompt hash.
+
+---
+
+## Token Headroom Analysis
+
+| Metric | Value |
+|--------|-------|
+| Input prompt | ~5,000 tokens |
+| Context window (`--ctx-size`) | 16,384 tokens |
+| **Context headroom** | **~11,384 tokens** |
+| Output max (`-n`) | 1,200 tokens |
+| Typical JSON output | 200-400 tokens |
+| **Output headroom** | **~800 tokens** |
+| Reply context addition | ~100 tokens |
+
+No token config changes needed. Reply context and HITL clarification fit comfortably.
 
 ---
 

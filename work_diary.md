@@ -1,8 +1,101 @@
 # Work Diary — Fleet Tracker
 
-## 2026-04-05 Session
+## 2026-04-05 Session — Complete Log
 
-### Tasks Completed
+### Phase 1: LLM Quality Regression Test
+- Ran 10 test messages through real LLM (Qwen2.5-32B on 10.0.0.4:8001)
+- All known issues from CLAUDE.md verified as resolved
+- Average LLM time: 9.5s (vs documented 60-150s)
+- KV cache staleness: FIXED (--no-cache-prompt working)
+- Status field missing: FIXED (0/13 events)
+- site_alias without site_id: FIXED (committer normalization)
+
+### Phase 2: Frontend E2E Test
+- Created test_frontend.js with Playwright
+- 40/40 tests passed across all tabs
+- Screenshots captured for dashboard, operator, commits, admin
+
+### Phase 3: Docker Deployment Audit & Fixes
+- docker-compose.yml defaults updated for Qwen2.5-32B
+- .env populated with all required variables
+- .env.example updated
+- Makefile reset-wa-session fixed
+- Committed and pushed all fixes
+
+### Phase 4: Registry Population
+- Extracted trucks and sites from level2.json (real chat data)
+- Added 17 trucks via API (A-V single letters + UP26 + UP80)
+- Added 9 sites via API (KN4, SOC, BG, DAIRY, LG, SKP, PL, TN, BINAI)
+
+### Phase 5: Reply-to-Context Feature (NEW)
+**User request**: Operators reply to WA messages to add verbs or corrections.
+**Files changed:**
+- schema.sql: added `quoted_wa_message_id` to raw_messages
+- migrate.py: migration for new column
+- database.py: insert_raw_message() accepts quoted_wa_message_id
+- ingest.py: passes quoted_wa_message_id through pipeline
+- pipeline_service.py: accepts quoted_wa_message_id parameter
+- level2.py: _get_reply_context() looks up original message events
+- level3.py: injects reply context into prompt via l3_context_summary
+- committer.py: caps reply confidence at 0.82, _detect_correction_from_reply()
+- wa_notifier.py: send_summary_to_group(), _post_send_message()
+- wa_listener/index.js: /send-message endpoint
+- main.py: auto-end shift posts summary
+- shifts.py: manual shift end posts summary
+- level3_prompt_template.txt: R15 reply context rule
+
+### Phase 6: Auto-post Shift Summary (NEW)
+**User request**: Post summary when asked or when shift ends.
+- Level 2 detects SUMMARY_REQUEST (standalone "loading over", count keywords)
+- Pipeline service calls wa_notifier.send_summary_to_group()
+- Anti-loop: WA listener skips msg.key.fromMe
+
+### Phase 7: Admin Edit/Delete
+- DELETE endpoints in registry.py with FK checks
+- Edit/delete buttons in frontend tables
+
+### Phase 8: Comprehensive Sequential Test (12 messages, real LLM)
+- 44/44 checks passed, 0 failed
+- All message types verified: single, multi-truck, multi-verb, tally, noise, unknown, vehicle number, site inference, KV cache
+- LLM output archive: 12 records, all raw outputs stored
+- Sanitizer: all clean, no injection detected
+
+### Phase 9: Full Code Audit
+**Bugs found and fixed:**
+1. **CRITICAL**: WA_GROUP_JID not in config.py → ImportError on shift end
+2. **CRITICAL**: delete_site() crashes on tallies.site_id (column doesn't exist)
+3. **MODERATE**: schema.sql missing 5 migration columns on events table
+4. **MODERATE**: schema.sql missing shift_name on shifts table
+5. **LOW**: Dead unreachable code in level2.py _get_reply_context()
+6. **LOW**: Reprocess endpoints bypass LLM semaphore
+7. **LOW**: MODEL_NAME not imported in pipeline_service.py
+
+### Phase 10: LLM Injection Sanitizer
+- Created sanitizer.py with injection detection, field validation, confidence clamping
+- llm_outputs table for forensic recovery
+- Pipeline service archives every LLM call
+- docs/flows_and_features.md created with all message types and flows
+
+### Phase 11: Documentation
+- QWEN.md created and continuously updated
+- docs/brainstorming.md created
+- work_diary.md created
+- docs/flows_and_features.md created
+
+### Commits Made
+1. `16390d9` — fix: docker deployment config, LLM quality fixes
+2. `318303d` — feat: reply-to-context, auto-post shift summary, admin edit/delete
+3. `3a203ad` — feat: LLM injection sanitizer, audit hardening, flows doc
+4. `71cc132` — fix: audit bugs — WA_GROUP_JID, delete_site crash, schema drift, dead code, reprocess semaphore
+5. `790b697` — fix: import MODEL_NAME in pipeline_service
+6. `7ffd25f` — chore: add test artifacts to gitignore
+
+### Current State
+- All code committed and pushed to main
+- Server deployment ready (docker compose down -v + git pull + make up)
+- .env.copy created for server deployment
+- All known bugs fixed
+- All tests passing
 
 #### 1. LLM Quality Regression Test
 - Created `test_llm_regression.py` to verify all known issues from CLAUDE.md
