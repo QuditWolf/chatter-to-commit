@@ -74,3 +74,14 @@ verify_pending.py
 
 CLAUDE.md
 todo
+
+# ── Test artifacts and screenshots ────────────────────────────────────────────
+*.png
+test_*.py
+test_*.js
+*_report.json
+test_report.txt
+level2.json
+package.json
+package-lock.json
+.playwright-mcp/
