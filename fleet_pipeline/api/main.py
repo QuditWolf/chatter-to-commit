@@ -7,6 +7,7 @@ Start with:
 Or:
     python -m fleet_pipeline.api.main
 """
+
 import asyncio
 import json
 import logging
@@ -39,21 +40,25 @@ from fleet_pipeline.api.routes import ingest as ingest_route
 from fleet_pipeline.api.routes import status as status_route
 from fleet_pipeline.api.agent_query import agent_answer
 
+
 def _setup_file_logging() -> None:
     """Add a rotating file handler to all relevant loggers so logs land in LOGS_DIR/api.log."""
     from fleet_pipeline.config import LOGS_DIR
+
     logs_dir = Path(LOGS_DIR)
     logs_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
         logs_dir / "api.log",
-        maxBytes=20 * 1024 * 1024,   # 20 MB per file
+        maxBytes=20 * 1024 * 1024,  # 20 MB per file
         backupCount=5,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    ))
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+    )
     # Root logger catches fleet_pipeline.* and anything else not listed below
     logging.getLogger().addHandler(handler)
     # Uvicorn writes access + error logs through these named loggers
@@ -67,6 +72,7 @@ async def lifespan(application: FastAPI):
     _setup_file_logging()
     from fleet_pipeline.db.migrate import run_migrations
     from fleet_pipeline.config import DB_PATH as _DB_PATH
+
     run_migrations(_DB_PATH)
 
     async def _auto_end_shift_loop():
@@ -74,6 +80,7 @@ async def lifespan(application: FastAPI):
         import sqlite3 as _sq3
         from datetime import datetime, timezone
         from fleet_pipeline.pipeline.shift_detector import ShiftDetector, AUTO_END_GAP
+
         while True:
             await asyncio.sleep(300)  # check every 5 minutes
             try:
@@ -86,11 +93,24 @@ async def lifespan(application: FastAPI):
                     gap = (datetime.now(timezone.utc) - sd._last_ts).total_seconds()
                     if gap >= AUTO_END_GAP:
                         shift_id_log = sd._active.get("shift_id", "")
+                        # Post summary before ending the shift
+                        from fleet_pipeline.config import WA_GROUP_JID
+
+                        if WA_GROUP_JID:
+                            try:
+                                from fleet_pipeline.pipeline.wa_notifier import (
+                                    send_summary_to_group,
+                                )
+
+                                send_summary_to_group(WA_GROUP_JID, _DB_PATH)
+                            except Exception as _exc:
+                                log.warning("Auto-end summary post failed: %s", _exc)
                         sd._end(datetime.now(timezone.utc))
                         conn.commit()
                         log.info(
                             "Auto-ended shift %s after %.0fs inactivity",
-                            shift_id_log, gap,
+                            shift_id_log,
+                            gap,
                         )
                         await ws_manager.broadcast(
                             "shift_changed", {"reason": "auto_end_inactivity"}
@@ -120,9 +140,14 @@ app = FastAPI(
 #   /api/ingest/wa-message  — called by Node.js WA listener (internal network only)
 #   /docs, /openapi.json, /redoc  — FastAPI Swagger UI (dev)
 _AUTH_EXEMPT = (
-    "/static/", "/api/auth/", "/api/ingest/wa-message",
-    "/docs", "/openapi.json", "/redoc",
+    "/static/",
+    "/api/auth/",
+    "/api/ingest/wa-message",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
 )
+
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -137,7 +162,9 @@ async def auth_middleware(request: Request, call_next):
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     return await call_next(request)
 
+
 # ── WebSocket connection manager ─────────────────────────────────────────────
+
 
 class ConnectionManager:
     def __init__(self):
@@ -189,6 +216,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
 # ── REST routes ──────────────────────────────────────────────────────────────
 
 from fleet_pipeline.api import auth as auth_module
+
 app.include_router(auth_module.router)
 app.include_router(fleet.router)
 app.include_router(hitl.router)
@@ -218,6 +246,7 @@ def root():
 
 # ── NL query ─────────────────────────────────────────────────────────────────
 
+
 class QueryRequest(BaseModel):
     question: str
 
@@ -236,6 +265,7 @@ def health():
 
 # ── Dev helpers ───────────────────────────────────────────────────────────────
 
+
 @app.post("/api/dev/broadcast")
 async def dev_broadcast(event_type: str = "fleet_state_updated"):
     """Dev-only: manually trigger a WS broadcast for testing."""
@@ -245,4 +275,7 @@ async def dev_broadcast(event_type: str = "fleet_state_updated"):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("fleet_pipeline.api.main:app", host=API_HOST, port=API_PORT, reload=True)
+
+    uvicorn.run(
+        "fleet_pipeline.api.main:app", host=API_HOST, port=API_PORT, reload=True
+    )

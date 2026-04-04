@@ -10,6 +10,7 @@ Responsibilities:
 
 The LLM object is created once and reused across calls (pass it in).
 """
+
 import json
 import re
 import sys
@@ -19,14 +20,21 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fleet_pipeline.config import (
-    MODEL_NAME, LLM_TEMPERATURE, LLM_MAX_TOKENS, PROMPT_TEMPLATE_PATH, L3_MAX_HISTORY,
-    LLM_MOCK, LLM_BASE_URL, LLM_API_KEY,
+    MODEL_NAME,
+    LLM_TEMPERATURE,
+    LLM_MAX_TOKENS,
+    PROMPT_TEMPLATE_PATH,
+    L3_MAX_HISTORY,
+    LLM_MOCK,
+    LLM_BASE_URL,
+    LLM_API_KEY,
 )
 
 
 # ---------------------------------------------------------------------------
 # Prompt building
 # ---------------------------------------------------------------------------
+
 
 def convert_level2_to_prompt_obj(
     level2_msg: Dict[str, Any],
@@ -42,14 +50,29 @@ def convert_level2_to_prompt_obj(
     raw_block = level2_msg.get("raw", {})
     l2_meta_block = {
         "time_since_last_msg": level2_msg.get("cursor", {}).get("inactivity_window"),
-        "time_since_last_sender_msg": level2_msg.get("cursor", {}).get("time_since_last_sender_msg"),
+        "time_since_last_sender_msg": level2_msg.get("cursor", {}).get(
+            "time_since_last_sender_msg"
+        ),
         "rough_shift_id": level2_msg.get("rough_shift_id"),
         "lang": level2_msg.get("lang"),
-        "global_inactivity_window": level2_msg.get("cursor", {}).get("inactivity_window", 0),
+        "global_inactivity_window": level2_msg.get("cursor", {}).get(
+            "inactivity_window", 0
+        ),
         "candidate_msg_type": level2_msg.get("candidate_msg_type"),
         "rough_trucks": level2_msg.get("rough_trucks", []),
         "rough_sites": level2_msg.get("rough_sites", []),
         "rough_status_keywords": level2_msg.get("rough_status_keywords", []),
+    }
+
+    reply_ctx = level2_msg.get("reply_context")
+    l3_ctx = {
+        "last_status_events": deepcopy(l3_history),
+        **(
+            {"operator_clarification": operator_clarification}
+            if operator_clarification
+            else {}
+        ),
+        **({"reply_context": reply_ctx} if reply_ctx else {}),
     }
 
     return {
@@ -63,10 +86,7 @@ def convert_level2_to_prompt_obj(
             "is_deleted": raw_block.get("is_deleted", False),
         },
         "l2_meta": l2_meta_block,
-        "l3_context_summary": {
-            "last_status_events": deepcopy(l3_history),
-            **({"operator_clarification": operator_clarification} if operator_clarification else {}),
-        },
+        "l3_context_summary": l3_ctx,
         "truck_registry": deepcopy(truck_registry),
         "site_registry": deepcopy(site_registry),
     }
@@ -77,8 +97,12 @@ def build_prompt(template_text: str, prompt_obj: Dict[str, Any]) -> str:
     replacements = {
         "{RAW}": json.dumps(prompt_obj["raw"], ensure_ascii=False),
         "{L2_META}": json.dumps(prompt_obj["l2_meta"], ensure_ascii=False),
-        "{L3_CONTEXT}": json.dumps(prompt_obj["l3_context_summary"], ensure_ascii=False),
-        "{TRUCK_REGISTRY}": json.dumps(prompt_obj["truck_registry"], ensure_ascii=False),
+        "{L3_CONTEXT}": json.dumps(
+            prompt_obj["l3_context_summary"], ensure_ascii=False
+        ),
+        "{TRUCK_REGISTRY}": json.dumps(
+            prompt_obj["truck_registry"], ensure_ascii=False
+        ),
         "{SITE_REGISTRY}": json.dumps(prompt_obj["site_registry"], ensure_ascii=False),
     }
     out = template_text
@@ -90,6 +114,7 @@ def build_prompt(template_text: str, prompt_obj: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Output parsing
 # ---------------------------------------------------------------------------
+
 
 def strip_markdown_fences(text: str) -> str:
     """Strip ```json ... ``` wrapper and <think>...</think> blocks from LLM output."""
@@ -110,9 +135,12 @@ def _extract_partial_events(text: str) -> Optional[Dict[str, Any]]:
     Returns a minimal valid result dict, or None if no usable events were found.
     """
     _PARTIAL_MSG_ALIASES = {
-        "truck": "STATUS_UPDATE", "truck_update": "STATUS_UPDATE",
-        "status": "STATUS_UPDATE", "status_update": "STATUS_UPDATE",
-        "tally": "TALLY_UPDATE", "tally_update": "TALLY_UPDATE",
+        "truck": "STATUS_UPDATE",
+        "truck_update": "STATUS_UPDATE",
+        "status": "STATUS_UPDATE",
+        "status_update": "STATUS_UPDATE",
+        "tally": "TALLY_UPDATE",
+        "tally_update": "TALLY_UPDATE",
     }
     msg_type_m = re.search(r'"msg_type"\s*:\s*"([^"]+)"', text)
     raw_msg_type = msg_type_m.group(1) if msg_type_m else "STATUS_UPDATE"
@@ -137,7 +165,7 @@ def _extract_partial_events(text: str) -> Optional[Dict[str, Any]]:
             flat_events: list = []
             boundaries = [m.start() for m in truck_id_matches] + [len(text)]
             for idx, m in enumerate(truck_id_matches):
-                slice_text = text[boundaries[idx]:boundaries[idx + 1]]
+                slice_text = text[boundaries[idx] : boundaries[idx + 1]]
                 tid = m.group(1)
                 if not tid or tid == "null":
                     continue
@@ -154,7 +182,9 @@ def _extract_partial_events(text: str) -> Optional[Dict[str, Any]]:
                     "site_id": site_id_m2.group(1) if site_id_m2 else None,
                     "site_alias": site_alias_m2.group(1) if site_alias_m2 else None,
                     "confidence": float(conf_m2.group(1)) if conf_m2 else overall_conf,
-                    "inferred": inferred_m2.group(1) == "true" if inferred_m2 else False,
+                    "inferred": inferred_m2.group(1) == "true"
+                    if inferred_m2
+                    else False,
                 }
                 if ev.get("status"):
                     flat_events.append(ev)
@@ -176,14 +206,14 @@ def _extract_partial_events(text: str) -> Optional[Dict[str, Any]]:
     depth = 0
     start = None
     for i, ch in enumerate(text[arr_start:], arr_start):
-        if ch == '{':
+        if ch == "{":
             if depth == 0:
                 start = i
             depth += 1
-        elif ch == '}':
+        elif ch == "}":
             depth -= 1
             if depth == 0 and start is not None:
-                fragment = text[start:i + 1]
+                fragment = text[start : i + 1]
                 try:
                     ev = json.loads(fragment)
                 except json.JSONDecodeError:
@@ -191,13 +221,15 @@ def _extract_partial_events(text: str) -> Optional[Dict[str, Any]]:
                     continue
                 # Drop hallucinated entries: string "null" truck_id, or totally empty events
                 tid = ev.get("truck_id")
-                if tid == "null" or (tid is None and not ev.get("truck_alias") and not ev.get("status")):
+                if tid == "null" or (
+                    tid is None and not ev.get("truck_alias") and not ev.get("status")
+                ):
                     start = None
                     continue
                 if ev.get("status"):  # at minimum must have a status
                     events.append(ev)
                 start = None
-        elif ch == ']' and depth == 0:
+        elif ch == "]" and depth == 0:
             break  # end of events array
 
     # TALLY_UPDATE: events array is always empty — extract tally field instead
@@ -243,15 +275,25 @@ def parse_llm_output(raw_text: str) -> Dict[str, Any]:
     Returns an error dict only when all recovery attempts fail.
     """
     if not raw_text:
-        return {"msg_type": "ERROR", "events": [], "error": "No output from model", "raw_llm_output": ""}
+        return {
+            "msg_type": "ERROR",
+            "events": [],
+            "error": "No output from model",
+            "raw_llm_output": "",
+        }
 
     cleaned = strip_markdown_fences(raw_text)
 
     _MSG_TYPE_ALIASES = {
-        "truck": "STATUS_UPDATE", "truck_update": "STATUS_UPDATE",
-        "status": "STATUS_UPDATE", "status_update": "STATUS_UPDATE",
-        "tally": "TALLY_UPDATE", "tally_update": "TALLY_UPDATE",
-        "correction": "CORRECTION", "noise": "NOISE", "query": "QUERY",
+        "truck": "STATUS_UPDATE",
+        "truck_update": "STATUS_UPDATE",
+        "status": "STATUS_UPDATE",
+        "status_update": "STATUS_UPDATE",
+        "tally": "TALLY_UPDATE",
+        "tally_update": "TALLY_UPDATE",
+        "correction": "CORRECTION",
+        "noise": "NOISE",
+        "query": "QUERY",
     }
 
     def _normalize(d: dict) -> dict:
@@ -299,7 +341,11 @@ def parse_llm_output(raw_text: str) -> Dict[str, Any]:
     recovered = _extract_partial_events(candidate)
     if recovered is not None:
         import sys
-        print("[Level3] parse_llm_output: recovered partial events from corrupted output", file=sys.stderr)
+
+        print(
+            "[Level3] parse_llm_output: recovered partial events from corrupted output",
+            file=sys.stderr,
+        )
         return recovered
 
     return {
@@ -313,6 +359,7 @@ def parse_llm_output(raw_text: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Level 3 Processor
 # ---------------------------------------------------------------------------
+
 
 class Level3Processor:
     """
@@ -334,8 +381,8 @@ class Level3Processor:
         # mock=True arg OR env var both activate mock mode
         self.mock = mock or LLM_MOCK
         self.model_name = model_name
-        self.llm = None          # vLLM in-process handle
-        self._openai = None      # OpenAI-compat client
+        self.llm = None  # vLLM in-process handle
+        self._openai = None  # OpenAI-compat client
 
         with open(prompt_template_path, "r", encoding="utf-8") as f:
             self.template_text = f.read()
@@ -348,13 +395,16 @@ class Level3Processor:
             try:
                 from openai import OpenAI
                 import os as _os
+
                 _llm_timeout = float(_os.environ.get("FLEET_LLM_TIMEOUT", "600"))
                 self._openai = OpenAI(
                     base_url=LLM_BASE_URL,
                     api_key=LLM_API_KEY,
                     timeout=_llm_timeout,
                 )
-                print(f"[Level3] Using OpenAI-compat endpoint: {LLM_BASE_URL} / model: {model_name}")
+                print(
+                    f"[Level3] Using OpenAI-compat endpoint: {LLM_BASE_URL} / model: {model_name}"
+                )
             except ImportError:
                 raise RuntimeError(
                     "openai package not installed. Run: pip install openai"
@@ -363,6 +413,7 @@ class Level3Processor:
             # Legacy in-process vLLM (requires GPU + vllm package)
             try:
                 from vllm import LLM, SamplingParams
+
                 self.llm = LLM(model_name)
                 self.params = SamplingParams(
                     temperature=LLM_TEMPERATURE,
@@ -392,7 +443,10 @@ class Level3Processor:
         Returns the parsed Level 3 result dict.
         """
         prompt_obj = convert_level2_to_prompt_obj(
-            level2_msg, truck_registry, site_registry, l3_history or [],
+            level2_msg,
+            truck_registry,
+            site_registry,
+            l3_history or [],
             operator_clarification=operator_clarification,
         )
         prompt_text = build_prompt(self.template_text, prompt_obj)
@@ -424,15 +478,25 @@ class Level3Processor:
                     raw_output = (msg.content or "").strip()
                     if raw_output:
                         if attempt > 0:
-                            print(f"[Level3] Retry {attempt} succeeded (temp={retry_temp:.1f})", file=sys.stderr)
+                            print(
+                                f"[Level3] Retry {attempt} succeeded (temp={retry_temp:.1f})",
+                                file=sys.stderr,
+                            )
                         break
                     print(
-                        f"[Level3] Attempt {attempt+1}: content empty"
-                        + (f" — retrying temp={retry_temp+0.3:.1f}" if attempt == 0 else ""),
+                        f"[Level3] Attempt {attempt + 1}: content empty"
+                        + (
+                            f" — retrying temp={retry_temp + 0.3:.1f}"
+                            if attempt == 0
+                            else ""
+                        ),
                         file=sys.stderr,
                     )
                 except Exception as e:
-                    print(f"[Level3] OpenAI-compat error (attempt {attempt+1}): {e}", file=sys.stderr)
+                    print(
+                        f"[Level3] OpenAI-compat error (attempt {attempt + 1}): {e}",
+                        file=sys.stderr,
+                    )
                     break
         else:
             try:
@@ -470,25 +534,53 @@ class Level3Processor:
         _base = {"tally": None, "query": None, "notes": "mock", "shift_id": shift_id}
 
         if candidate == "DELETED":
-            return json.dumps({**_base, "msg_type": "NOISE", "events": [],
-                                "overall_confidence": 0.5, "commit_recommendation": "HOLD"})
+            return json.dumps(
+                {
+                    **_base,
+                    "msg_type": "NOISE",
+                    "events": [],
+                    "overall_confidence": 0.5,
+                    "commit_recommendation": "HOLD",
+                }
+            )
 
         if candidate == "TALLY_LIKE":
-            return json.dumps({**_base, "msg_type": "TALLY_UPDATE", "events": [],
-                                "tally": {"note": "mock tally"},
-                                "overall_confidence": 0.9, "commit_recommendation": "COMMIT"})
+            return json.dumps(
+                {
+                    **_base,
+                    "msg_type": "TALLY_UPDATE",
+                    "events": [],
+                    "tally": {"note": "mock tally"},
+                    "overall_confidence": 0.9,
+                    "commit_recommendation": "COMMIT",
+                }
+            )
 
         if candidate in ("QUERY_LIKE",):
-            return json.dumps({**_base, "msg_type": "QUERY", "events": [],
-                                "query": {"intent": "STATUS_CHECK"},
-                                "overall_confidence": 0.9, "commit_recommendation": "HOLD"})
+            return json.dumps(
+                {
+                    **_base,
+                    "msg_type": "QUERY",
+                    "events": [],
+                    "query": {"intent": "STATUS_CHECK"},
+                    "overall_confidence": 0.9,
+                    "commit_recommendation": "HOLD",
+                }
+            )
 
         if candidate == "STATUS_LIKE" and rough_trucks and rough_kws:
             STATUS_MAP = {
-                "ls": "LS", "lo": "LO", "us": "US", "uo": "UO",
-                "enter": "ENTER", "left": "LEFT",
-                "loading started": "LS", "loading over": "LO",
-                "loading": "LS", "unloaded": "UO", "unloading": "US",
+                "ls": "LS",
+                "lo": "LO",
+                "us": "US",
+                "uo": "UO",
+                "enter": "ENTER",
+                "left": "LEFT",
+                "loading started": "LS",
+                "loading over": "LO",
+                "loading": "LS",
+                "unloaded": "UO",
+                "unloading": "US",
             }
             status = None
             for kw in rough_kws:
@@ -504,34 +596,57 @@ class Level3Processor:
                 site_alias = rough_sites[0] if rough_sites else None
                 site_id = self._mock_resolve_site(site_alias) if site_alias else None
                 conf = 0.88 if (truck_id and site_id) else (0.55 if truck_id else 0.35)
-                events.append({
-                    "event_id": str(uuid4()),
-                    "truck_alias": truck_alias,
-                    "truck_id": truck_id,
-                    "status": status,
-                    "site_alias": site_alias,
-                    "site_id": site_id,
-                    "material": None,
-                    "timestamp_effective": ts,
-                    "inferred": not (truck_id and site_id),
-                    "confidence": conf,
-                    "reasoning": f"mock: {truck_alias} {status} at {site_alias or 'unknown'}",
-                })
+                events.append(
+                    {
+                        "event_id": str(uuid4()),
+                        "truck_alias": truck_alias,
+                        "truck_id": truck_id,
+                        "status": status,
+                        "site_alias": site_alias,
+                        "site_id": site_id,
+                        "material": None,
+                        "timestamp_effective": ts,
+                        "inferred": not (truck_id and site_id),
+                        "confidence": conf,
+                        "reasoning": f"mock: {truck_alias} {status} at {site_alias or 'unknown'}",
+                    }
+                )
 
             if events:
                 conf = sum(e["confidence"] for e in events) / len(events)
-                commit = "COMMIT" if conf >= 0.85 else "COMMIT_FLAG" if conf >= 0.6 else "HOLD"
-                return json.dumps({**_base, "msg_type": "STATUS_UPDATE", "events": events,
-                                   "overall_confidence": round(conf, 2), "commit_recommendation": commit})
+                commit = (
+                    "COMMIT"
+                    if conf >= 0.85
+                    else "COMMIT_FLAG"
+                    if conf >= 0.6
+                    else "HOLD"
+                )
+                return json.dumps(
+                    {
+                        **_base,
+                        "msg_type": "STATUS_UPDATE",
+                        "events": events,
+                        "overall_confidence": round(conf, 2),
+                        "commit_recommendation": commit,
+                    }
+                )
 
-        return json.dumps({**_base, "msg_type": "NOISE", "events": [],
-                           "overall_confidence": 0.9, "commit_recommendation": "HOLD"})
+        return json.dumps(
+            {
+                **_base,
+                "msg_type": "NOISE",
+                "events": [],
+                "overall_confidence": 0.9,
+                "commit_recommendation": "HOLD",
+            }
+        )
 
     def _mock_resolve_truck(self, alias: str) -> Optional[str]:
         """Best-effort truck_id lookup for mock mode."""
         if not hasattr(self, "_mock_truck_map"):
             try:
                 from fleet_pipeline.pipeline.registries import load_truck_registry
+
                 reg = load_truck_registry()
                 self._mock_truck_map = {}
                 for tid, aliases in reg.items():
@@ -547,6 +662,7 @@ class Level3Processor:
         if not hasattr(self, "_mock_site_map"):
             try:
                 from fleet_pipeline.pipeline.registries import load_site_registry
+
                 reg = load_site_registry()
                 self._mock_site_map = {}
                 for sid, aliases in reg.items():
@@ -562,23 +678,29 @@ class Level3Processor:
 # Rolling history helper
 # ---------------------------------------------------------------------------
 
-def update_l3_history(history: List[Dict], parsed: Dict[str, Any], max_size: int = L3_MAX_HISTORY) -> List[Dict]:
+
+def update_l3_history(
+    history: List[Dict], parsed: Dict[str, Any], max_size: int = L3_MAX_HISTORY
+) -> List[Dict]:
     """Append STATUS_UPDATE events to rolling history; trim to max_size."""
     if parsed.get("msg_type") == "STATUS_UPDATE":
         for ev in parsed.get("events", []):
-            history.append({
-                "truck_id": ev.get("truck_id"),
-                "truck_alias": ev.get("truck_alias"),
-                "site_id": ev.get("site_id"),
-                "status": ev.get("status"),
-                "timestamp_effective": ev.get("timestamp_effective"),
-            })
+            history.append(
+                {
+                    "truck_id": ev.get("truck_id"),
+                    "truck_alias": ev.get("truck_alias"),
+                    "site_id": ev.get("site_id"),
+                    "status": ev.get("status"),
+                    "timestamp_effective": ev.get("timestamp_effective"),
+                }
+            )
     return history[-max_size:]
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def parse_iso(ts: str) -> Optional[datetime]:
     if not ts:

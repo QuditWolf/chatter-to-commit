@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS raw_messages (
     is_edited   BOOLEAN DEFAULT FALSE,
     is_deleted  BOOLEAN DEFAULT FALSE,
     media_type  TEXT,
+    quoted_wa_message_id TEXT,          -- WA msg ID this message is replying to
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

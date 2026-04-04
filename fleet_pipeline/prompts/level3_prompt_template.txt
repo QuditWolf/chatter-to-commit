@@ -120,6 +120,17 @@ R14 OPERATOR CLARIFICATION — if operator_clarification present in L3_CONTEXT:
     it overrides raw_text. inferred=false, confidence=0.95,
     reasoning="operator clarified: {clarification}".
 
+R15 REPLY CONTEXT — if reply_context is present in L3_CONTEXT, this message is a
+    WhatsApp reply to a previous message. Use the reply context to resolve missing
+    fields (truck, site, status) that are implied but not stated in raw_text.
+    • If raw_text is just a status keyword (e.g. "LS", "LO", "LEFT") → use the
+      truck(s) and site(s) from reply_context.
+    • If raw_text has a truck but no site → use site from reply_context.
+    • If raw_text has a truck AND site → use them directly (reply context is backup).
+    • Example: reply to "D enter KN4" with text "LS" → TD LS KN4
+    • Example: reply to "B,C enter SOC" with text "LO" → TB LO SOC + TC LO SOC
+    Set inferred=true and confidence=0.82 for reply-resolved events.
+
 ══════════════
 OUTPUT SCHEMA
 ══════════════

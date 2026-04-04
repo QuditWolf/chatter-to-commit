@@ -8,6 +8,7 @@ is routed back as an HITL answer, bypassing the normal pipeline.
 
 Entry point: notify_hitl_questions(questions, group_jid)
 """
+
 import json
 import logging
 import os
@@ -120,13 +121,17 @@ def _format_hitl_message(q_type: str, context: dict, raw_text: str) -> str:
     return f"❓ *Clarification needed*\n\nOriginal: {orig}"
 
 
-def _post_send_reply(group_jid: str, text: str, quote_id: Optional[str]) -> Optional[str]:
+def _post_send_reply(
+    group_jid: str, text: str, quote_id: Optional[str]
+) -> Optional[str]:
     """POST to Node.js /send-reply. Returns bot_message_id or None on failure."""
-    payload = json.dumps({
-        "group_jid": group_jid,
-        "text": text,
-        "quote_id": quote_id,
-    }).encode()
+    payload = json.dumps(
+        {
+            "group_jid": group_jid,
+            "text": text,
+            "quote_id": quote_id,
+        }
+    ).encode()
     try:
         req = urllib.request.Request(
             f"{WA_LISTENER_URL}/send-reply",
@@ -182,7 +187,150 @@ def notify_hitl_questions(
             except Exception as exc:
                 log.warning("wa_notifier: could not store bot_wa_message_id: %s", exc)
             log.info(
-                "wa_notifier: sent HITL reply for %s (bot_msg=%s)", q["question_id"], bot_msg_id
+                "wa_notifier: sent HITL reply for %s (bot_msg=%s)",
+                q["question_id"],
+                bot_msg_id,
             )
         else:
-            log.warning("wa_notifier: no bot_message_id returned for %s", q["question_id"])
+            log.warning(
+                "wa_notifier: no bot_message_id returned for %s", q["question_id"]
+            )
+
+
+def send_summary_to_group(group_jid: str, db_path: str) -> None:
+    """
+    Generate the current shift summary and post it to the WA group.
+    Uses the same format as the frontend's copyable summary (emoji-free).
+    """
+    if not group_jid:
+        return
+
+    import sqlite3
+    import urllib.request
+
+    # Generate summary text using the same logic as the analytics endpoint
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+
+            # Find active shift
+            shift = conn.execute(
+                """SELECT shift_id, shift_number, shift_name
+                   FROM shifts WHERE ended_at IS NULL
+                   ORDER BY started_at DESC LIMIT 1"""
+            ).fetchone()
+
+            if not shift:
+                text = "No active shift found."
+            else:
+                shift_id = shift["shift_id"]
+                shift_num = shift["shift_number"]
+
+                # Aggregate by site
+                loaded_by_site = conn.execute(
+                    """SELECT e.site_alias, COUNT(*) as cnt
+                       FROM events e
+                       WHERE e.shift_id=? AND e.status='LO' AND e.commit_status IN ('COMMITTED','FLAGGED')
+                       GROUP BY e.site_id ORDER BY cnt DESC""",
+                    (shift_id,),
+                ).fetchall()
+
+                reached_by_site = conn.execute(
+                    """SELECT e.site_alias, COUNT(*) as cnt
+                       FROM events e
+                       WHERE e.shift_id=? AND e.status='ENTER' AND e.commit_status IN ('COMMITTED','FLAGGED')
+                         AND EXISTS (SELECT 1 FROM sites s WHERE s.site_id=e.site_id AND s.site_type='unloading')
+                       GROUP BY e.site_id ORDER BY cnt DESC""",
+                    (shift_id,),
+                ).fetchall()
+
+                unloaded_by_site = conn.execute(
+                    """SELECT e.site_alias, COUNT(*) as cnt
+                       FROM events e
+                       WHERE e.shift_id=? AND e.status='UO' AND e.commit_status IN ('COMMITTED','FLAGGED')
+                       GROUP BY e.site_id ORDER BY cnt DESC""",
+                    (shift_id,),
+                ).fetchall()
+
+                # Per-truck cycle counts
+                truck_lo = conn.execute(
+                    """SELECT e.truck_alias, COUNT(*) as cnt
+                       FROM events e
+                       WHERE e.shift_id=? AND e.status='LO' AND e.commit_status IN ('COMMITTED','FLAGGED')
+                       GROUP BY e.truck_id ORDER BY e.truck_alias""",
+                    (shift_id,),
+                ).fetchall()
+
+                truck_uo = conn.execute(
+                    """SELECT e.truck_alias, COUNT(*) as cnt
+                       FROM events e
+                       WHERE e.shift_id=? AND e.status='UO' AND e.commit_status IN ('COMMITTED','FLAGGED')
+                       GROUP BY e.truck_id ORDER BY e.truck_alias""",
+                    (shift_id,),
+                ).fetchall()
+
+                total_loaded = sum(r["cnt"] for r in loaded_by_site)
+                total_unloaded = sum(r["cnt"] for r in unloaded_by_site)
+
+                # Build text summary
+                lines = [f"-- Shift {shift_num} summary --"]
+                lines.append(f"Total Trolleys Loaded (all sites) = {total_loaded}")
+                for r in loaded_by_site:
+                    lines.append(
+                        f"  Trolleys Loaded @{r['site_alias'] or '?'} = {r['cnt']}"
+                    )
+                lines.append("")
+                lines.append(f"Total Trolleys Unloaded (all sites) = {total_unloaded}")
+                for r in unloaded_by_site:
+                    lines.append(
+                        f"  Trolleys Unloaded @{r['site_alias'] or '?'} = {r['cnt']}"
+                    )
+
+                # Per-truck cycles
+                if truck_lo or truck_uo:
+                    lines.append("")
+                    lines.append("Per-truck cycles:")
+                    all_trucks = {}
+                    for r in truck_lo:
+                        all_trucks[r["truck_alias"]] = (
+                            all_trucks.get(r["truck_alias"], 0) + r["cnt"]
+                        )
+                    for r in truck_uo:
+                        all_trucks[r["truck_alias"]] = (
+                            all_trucks.get(r["truck_alias"], 0) + r["cnt"]
+                        )
+                    cycle_parts = [f"{t}: {c}" for t, c in sorted(all_trucks.items())]
+                    lines.append("  " + " | ".join(cycle_parts))
+
+                text = "\n".join(lines)
+
+    except Exception as exc:
+        text = f"Error generating summary: {str(exc)[:100]}"
+        log.warning("send_summary_to_group: error generating summary: %s", exc)
+
+    # Post to WA group (plain message, no quote)
+    _post_send_message(group_jid, text)
+    log.info("wa_notifier: posted shift summary to group %s", group_jid)
+
+
+def _post_send_message(group_jid: str, text: str) -> Optional[str]:
+    """POST to Node.js /send-message. Returns bot_message_id or None on failure."""
+    payload = json.dumps(
+        {
+            "group_jid": group_jid,
+            "text": text,
+        }
+    ).encode()
+    try:
+        req = urllib.request.Request(
+            f"{WA_LISTENER_URL}/send-message",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            body = json.loads(resp.read())
+            return body.get("bot_message_id")
+    except Exception as exc:
+        log.warning("wa_notifier: failed to send WA message: %s", exc)
+        return None

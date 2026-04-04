@@ -7,6 +7,7 @@ and exposes a process_raw_text() function for manual message injection.
 The processor is initialised lazily on first use so the API starts instantly
 even if the LLM endpoint is not yet reachable.
 """
+
 import logging
 import threading
 import time
@@ -23,7 +24,11 @@ from fleet_pipeline.pipeline.level1 import parse_timestamp
 from fleet_pipeline.pipeline.level2 import Enricher, EnricherConfig
 from fleet_pipeline.pipeline.level3 import Level3Processor
 from fleet_pipeline.pipeline.committer import Committer
-from fleet_pipeline.pipeline.registries import load_truck_registry, load_site_registry, build_vocab_from_db
+from fleet_pipeline.pipeline.registries import (
+    load_truck_registry,
+    load_site_registry,
+    build_vocab_from_db,
+)
 from fleet_pipeline.pipeline.shift_detector import ShiftDetector
 
 _lock = threading.Lock()
@@ -46,10 +51,12 @@ def _get_enricher() -> Enricher:
         with _lock:
             if _enricher is None:
                 truck_vocab, site_vocab = build_vocab_from_db(DB_PATH)
-                _enricher = Enricher(EnricherConfig(
-                    truck_vocab=truck_vocab,
-                    site_vocab=site_vocab,
-                ))
+                _enricher = Enricher(
+                    EnricherConfig(
+                        truck_vocab=truck_vocab,
+                        site_vocab=site_vocab,
+                    )
+                )
     return _enricher
 
 
@@ -68,6 +75,7 @@ def process_raw_text(
     operator_clarification: Optional[str] = None,
     wa_message_id: Optional[str] = None,
     group_jid: Optional[str] = None,
+    quoted_wa_message_id: Optional[str] = None,
 ) -> dict:
     """
     Run a raw message string through the full Level1→2→3→Commit pipeline.
@@ -76,13 +84,16 @@ def process_raw_text(
     wa_message_id: original WA message ID (Baileys key.id), used as msg_id and
                    stored on HITL questions for reply routing.
     group_jid:     WA group JID to send bot HITL clarification messages to.
+    quoted_wa_message_id: WA message ID this message is replying to (for reply-to-context).
     """
     _t_start = time.monotonic()
 
     if timestamp_iso is None:
-        timestamp_iso = datetime.now(timezone.utc).astimezone(
-            __import__("pytz").timezone("Asia/Kolkata")
-        ).isoformat()
+        timestamp_iso = (
+            datetime.now(timezone.utc)
+            .astimezone(__import__("pytz").timezone("Asia/Kolkata"))
+            .isoformat()
+        )
 
     # Use provided wa_message_id as msg_id so HITL questions link to the right WA message
     msg_id = wa_message_id or str(uuid4())
@@ -96,6 +107,7 @@ def process_raw_text(
         "is_edited": False,
         "is_deleted": False,
         "media_type": None,
+        "quoted_wa_message_id": quoted_wa_message_id,
     }
 
     # Pre-save the raw message to DB immediately.
@@ -124,7 +136,10 @@ def process_raw_text(
     processor = _get_processor()
     try:
         result = processor.process_message(
-            level2_msg, truck_registry, site_registry, l3_history,
+            level2_msg,
+            truck_registry,
+            site_registry,
+            l3_history,
             operator_clarification=operator_clarification,
         )
         # Pop audit fields before passing result to committer
@@ -144,24 +159,27 @@ def process_raw_text(
             "msg_type": "STATUS_UPDATE",
             "processing_id": str(uuid4()),
             "raw_message": level1_msg,
-            "events": [{
-                "event_id": str(uuid4()),
-                "truck_id": None,
-                "truck_alias": "",
-                "status": "UNKNOWN",
-                "site_id": None,
-                "site_alias": "",
-                "confidence": 0.0,
-                "reasoning": f"LLM unavailable — {raw_err}",
-                "timestamp_effective": timestamp_iso,
-                "inferred": False,
-            }],
+            "events": [
+                {
+                    "event_id": str(uuid4()),
+                    "truck_id": None,
+                    "truck_alias": "",
+                    "status": "UNKNOWN",
+                    "site_id": None,
+                    "site_alias": "",
+                    "confidence": 0.0,
+                    "reasoning": f"LLM unavailable — {raw_err}",
+                    "timestamp_effective": timestamp_iso,
+                    "inferred": False,
+                }
+            ],
             "overall_confidence": 0.0,
             "commit_recommendation": "HOLD",
         }
 
     # Inject shift_id via shift detector
     import sqlite3 as _sqlite3
+
     _sd_conn = _sqlite3.connect(DB_PATH)
     _sd_conn.row_factory = _sqlite3.Row
     _sd_conn.execute("PRAGMA journal_mode=WAL")
@@ -176,8 +194,10 @@ def process_raw_text(
 
     # Commit
     committer = Committer(
-        db_path=DB_PATH, wa_message_id=wa_message_id,
-        group_jid=group_jid, sender_id=sender_id,
+        db_path=DB_PATH,
+        wa_message_id=wa_message_id,
+        group_jid=group_jid,
+        sender_id=sender_id,
     )
     summary = committer.commit(result)
     summary["msg_id"] = msg_id
@@ -192,6 +212,7 @@ def process_raw_text(
     if summary.get("hitl_created", 0) > 0 and group_jid:
         try:
             from fleet_pipeline.pipeline.wa_notifier import notify_hitl_questions
+
             # Fetch the newly created open questions for this message
             with db.db_conn(DB_PATH) as _hconn:
                 q_rows = _hconn.execute(
@@ -204,43 +225,58 @@ def process_raw_text(
             # Attach raw_text into context for formatting (context already has it, but be safe)
             for q in questions:
                 q["raw_text"] = raw_text
-                q["original_wa_message_id"] = q.get("original_wa_message_id") or wa_message_id
+                q["original_wa_message_id"] = (
+                    q.get("original_wa_message_id") or wa_message_id
+                )
             notify_hitl_questions(questions, group_jid, DB_PATH)
         except Exception as _exc:
             log.warning("WA HITL notification failed: %s", _exc)
 
-    audit({
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "msg_id": msg_id,
-        "wa_message_id": wa_message_id,
-        "sender": sender_name,
-        "sender_id": sender_id,
-        "raw_text": raw_text,
-        "l2": {
-            "candidate_msg_type": level2_msg.get("candidate_msg_type"),
-            "rough_trucks": level2_msg.get("rough_trucks", []),
-            "rough_sites": level2_msg.get("rough_sites", []),
-            "rough_status_keywords": level2_msg.get("rough_status_keywords", []),
-            "lang": level2_msg.get("lang"),
-        },
-        "l3": {
-            "prompt": l3_prompt,
-            "raw_output": l3_raw_output,
-            "msg_type": result.get("msg_type"),
-            "overall_confidence": result.get("overall_confidence"),
-            "commit_recommendation": result.get("commit_recommendation"),
-            "events_parsed": len(result.get("events", [])),
-        },
-        "commit": {
-            "committed": summary.get("committed", 0),
-            "flagged": summary.get("flagged", 0),
-            "held": summary.get("held", 0),
-            "noise": summary.get("noise", 0),
-            "hitl_created": summary.get("hitl_created", 0),
-            "events": summary.get("events", []),
-        },
-        "error": summary.get("llm_error"),
-        "duration_ms": round((time.monotonic() - _t_start) * 1000),
-    })
+    # Summary request: generate and post shift summary to WA group
+    if level2_msg.get("candidate_msg_type") == "SUMMARY_REQUEST" and group_jid:
+        try:
+            from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group
+
+            send_summary_to_group(group_jid, DB_PATH)
+            summary["summary_posted"] = True
+        except Exception as _exc:
+            log.warning("WA summary posting failed: %s", _exc)
+            summary["summary_posted"] = False
+
+    audit(
+        {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "msg_id": msg_id,
+            "wa_message_id": wa_message_id,
+            "sender": sender_name,
+            "sender_id": sender_id,
+            "raw_text": raw_text,
+            "l2": {
+                "candidate_msg_type": level2_msg.get("candidate_msg_type"),
+                "rough_trucks": level2_msg.get("rough_trucks", []),
+                "rough_sites": level2_msg.get("rough_sites", []),
+                "rough_status_keywords": level2_msg.get("rough_status_keywords", []),
+                "lang": level2_msg.get("lang"),
+            },
+            "l3": {
+                "prompt": l3_prompt,
+                "raw_output": l3_raw_output,
+                "msg_type": result.get("msg_type"),
+                "overall_confidence": result.get("overall_confidence"),
+                "commit_recommendation": result.get("commit_recommendation"),
+                "events_parsed": len(result.get("events", [])),
+            },
+            "commit": {
+                "committed": summary.get("committed", 0),
+                "flagged": summary.get("flagged", 0),
+                "held": summary.get("held", 0),
+                "noise": summary.get("noise", 0),
+                "hitl_created": summary.get("hitl_created", 0),
+                "events": summary.get("events", []),
+            },
+            "error": summary.get("llm_error"),
+            "duration_ms": round((time.monotonic() - _t_start) * 1000),
+        }
+    )
 
     return summary

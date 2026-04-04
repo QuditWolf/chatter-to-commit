@@ -1,6 +1,7 @@
 """
 SQLite connection and query helpers for the fleet pipeline.
 """
+
 import json
 import os
 import sqlite3
@@ -47,6 +48,7 @@ def db_conn(db_path: str = DB_PATH):
 # Trucks
 # ---------------------------------------------------------------------------
 
+
 def insert_truck(conn: sqlite3.Connection, truck: Dict[str, Any]) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO trucks (truck_id, display_name, aliases, is_active)
@@ -66,17 +68,23 @@ def get_all_trucks(conn: sqlite3.Connection) -> List[Dict]:
 
 
 def add_truck_alias(conn: sqlite3.Connection, truck_id: str, alias: str) -> None:
-    row = conn.execute("SELECT aliases FROM trucks WHERE truck_id=?", (truck_id,)).fetchone()
+    row = conn.execute(
+        "SELECT aliases FROM trucks WHERE truck_id=?", (truck_id,)
+    ).fetchone()
     if not row:
         raise ValueError(f"truck_id '{truck_id}' not found")
     aliases = json.loads(row["aliases"])
     if alias not in aliases:
         aliases.append(alias)
-        conn.execute("UPDATE trucks SET aliases=? WHERE truck_id=?",
-                     (json.dumps(aliases, ensure_ascii=False), truck_id))
+        conn.execute(
+            "UPDATE trucks SET aliases=? WHERE truck_id=?",
+            (json.dumps(aliases, ensure_ascii=False), truck_id),
+        )
 
 
-def create_truck(conn: sqlite3.Connection, truck_id: str, display_name: str, aliases: List[str]) -> None:
+def create_truck(
+    conn: sqlite3.Connection, truck_id: str, display_name: str, aliases: List[str]
+) -> None:
     conn.execute(
         "INSERT INTO trucks (truck_id, display_name, aliases) VALUES (?, ?, ?)",
         (truck_id, display_name, json.dumps(aliases, ensure_ascii=False)),
@@ -86,6 +94,7 @@ def create_truck(conn: sqlite3.Connection, truck_id: str, display_name: str, ali
 # ---------------------------------------------------------------------------
 # Sites
 # ---------------------------------------------------------------------------
+
 
 def insert_site(conn: sqlite3.Connection, site: Dict[str, Any]) -> None:
     conn.execute(
@@ -107,26 +116,31 @@ def get_all_sites(conn: sqlite3.Connection) -> List[Dict]:
 
 
 def add_site_alias(conn: sqlite3.Connection, site_id: str, alias: str) -> None:
-    row = conn.execute("SELECT aliases FROM sites WHERE site_id=?", (site_id,)).fetchone()
+    row = conn.execute(
+        "SELECT aliases FROM sites WHERE site_id=?", (site_id,)
+    ).fetchone()
     if not row:
         raise ValueError(f"site_id '{site_id}' not found")
     aliases = json.loads(row["aliases"])
     if alias not in aliases:
         aliases.append(alias)
-        conn.execute("UPDATE sites SET aliases=? WHERE site_id=?",
-                     (json.dumps(aliases, ensure_ascii=False), site_id))
+        conn.execute(
+            "UPDATE sites SET aliases=? WHERE site_id=?",
+            (json.dumps(aliases, ensure_ascii=False), site_id),
+        )
 
 
 # ---------------------------------------------------------------------------
 # Raw messages
 # ---------------------------------------------------------------------------
 
+
 def insert_raw_message(conn: sqlite3.Connection, msg: Dict[str, Any]) -> None:
     conn.execute(
         """INSERT OR IGNORE INTO raw_messages
            (msg_id, source_file, timestamp_iso, sender_name, sender_id,
-            raw_text, is_edited, is_deleted, media_type)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            raw_text, is_edited, is_deleted, media_type, quoted_wa_message_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             msg["msg_id"],
             msg.get("source_file"),
@@ -137,6 +151,7 @@ def insert_raw_message(conn: sqlite3.Connection, msg: Dict[str, Any]) -> None:
             bool(msg.get("is_edited", False)),
             bool(msg.get("is_deleted", False)),
             msg.get("media_type"),
+            msg.get("quoted_wa_message_id"),
         ),
     )
 
@@ -144,6 +159,7 @@ def insert_raw_message(conn: sqlite3.Connection, msg: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
+
 
 def insert_event(conn: sqlite3.Connection, ev: Dict[str, Any]) -> None:
     conn.execute(
@@ -177,7 +193,9 @@ def insert_event(conn: sqlite3.Connection, ev: Dict[str, Any]) -> None:
     )
 
 
-def update_event_status(conn: sqlite3.Connection, event_id: str, commit_status: str) -> None:
+def update_event_status(
+    conn: sqlite3.Connection, event_id: str, commit_status: str
+) -> None:
     conn.execute(
         "UPDATE events SET commit_status=? WHERE event_id=?",
         (commit_status, event_id),
@@ -248,6 +266,7 @@ def get_l3_context(conn: sqlite3.Connection, limit: int = 20) -> List[Dict]:
 # Tallies
 # ---------------------------------------------------------------------------
 
+
 def insert_tally(conn: sqlite3.Connection, tally: Dict[str, Any]) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO tallies
@@ -267,6 +286,7 @@ def insert_tally(conn: sqlite3.Connection, tally: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # HITL queue
 # ---------------------------------------------------------------------------
+
 
 def insert_hitl_question(conn: sqlite3.Connection, q: Dict[str, Any]) -> None:
     conn.execute(
@@ -317,7 +337,9 @@ def get_open_question_by_bot_wa_id(
     return d
 
 
-def get_open_questions(conn: sqlite3.Connection, limit: int = 50, offset: int = 0) -> List[Dict]:
+def get_open_questions(
+    conn: sqlite3.Connection, limit: int = 50, offset: int = 0
+) -> List[Dict]:
     rows = conn.execute(
         "SELECT * FROM hitl_queue WHERE status='OPEN' AND question_type != 'DELETED_MESSAGE' ORDER BY created_at ASC LIMIT ? OFFSET ?",
         (limit, offset),
@@ -341,6 +363,7 @@ def answer_question(
     answered_by: str = "human",
 ) -> None:
     from datetime import datetime, timezone
+
     conn.execute(
         """UPDATE hitl_queue
            SET status='ANSWERED', answer=?, answered_by=?, answered_at=?
@@ -360,6 +383,7 @@ def dismiss_question(conn: sqlite3.Connection, question_id: str) -> None:
 # Simulation runs
 # ---------------------------------------------------------------------------
 
+
 def insert_simulation_run(conn: sqlite3.Connection, run: Dict[str, Any]) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO simulation_runs
@@ -369,8 +393,11 @@ def insert_simulation_run(conn: sqlite3.Connection, run: Dict[str, Any]) -> None
     )
 
 
-def update_simulation_run(conn: sqlite3.Connection, run_id: str, stats: Dict[str, Any]) -> None:
+def update_simulation_run(
+    conn: sqlite3.Connection, run_id: str, stats: Dict[str, Any]
+) -> None:
     from datetime import datetime, timezone
+
     conn.execute(
         """UPDATE simulation_runs SET
            finished_at=?, total_msgs=?, committed=?, flagged=?, held=?,
@@ -396,6 +423,7 @@ def update_simulation_run(conn: sqlite3.Connection, run_id: str, stats: Dict[str
 # ---------------------------------------------------------------------------
 # WA messages
 # ---------------------------------------------------------------------------
+
 
 def insert_wa_message(conn: sqlite3.Connection, msg: Dict[str, Any]) -> None:
     conn.execute(
@@ -425,6 +453,7 @@ def mark_wa_message_processed(conn: sqlite3.Connection, wa_message_id: str) -> N
 # Shifts
 # ---------------------------------------------------------------------------
 
+
 def insert_shift(conn: sqlite3.Connection, shift: Dict[str, Any]) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO shifts
@@ -450,9 +479,7 @@ def get_active_shift(conn: sqlite3.Connection) -> Optional[Dict]:
 
 
 def get_all_shifts(conn: sqlite3.Connection) -> List[Dict]:
-    rows = conn.execute(
-        "SELECT * FROM shifts ORDER BY started_at DESC"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM shifts ORDER BY started_at DESC").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -464,23 +491,30 @@ def close_shift(conn: sqlite3.Connection, shift_id: str, ended_at: str) -> None:
 
 
 def get_shift_config(conn: sqlite3.Connection) -> List[Dict]:
-    rows = conn.execute(
-        "SELECT * FROM shift_config ORDER BY shift_number"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM shift_config ORDER BY shift_number").fetchall()
     return [dict(r) for r in rows]
 
 
 def update_shift_config(
-    conn: sqlite3.Connection, shift_number: int, start_time: str,
-    expected_end: Optional[str], wa_keyword: Optional[str]
+    conn: sqlite3.Connection,
+    shift_number: int,
+    start_time: str,
+    expected_end: Optional[str],
+    wa_keyword: Optional[str],
 ) -> None:
     from datetime import datetime, timezone
+
     conn.execute(
         """UPDATE shift_config
            SET start_time=?, expected_end=?, wa_keyword=?, updated_at=?
            WHERE shift_number=?""",
-        (start_time, expected_end, wa_keyword,
-         datetime.now(timezone.utc).isoformat(), shift_number),
+        (
+            start_time,
+            expected_end,
+            wa_keyword,
+            datetime.now(timezone.utc).isoformat(),
+            shift_number,
+        ),
     )
 
 
@@ -488,8 +522,10 @@ def update_shift_config(
 # Corrections
 # ---------------------------------------------------------------------------
 
+
 def insert_correction(conn: sqlite3.Connection, c: Dict[str, Any]) -> None:
     from datetime import datetime, timezone
+
     conn.execute(
         """INSERT INTO corrections
            (correction_id, original_event_id, corrected_by, corrected_at,
@@ -509,7 +545,10 @@ def insert_correction(conn: sqlite3.Connection, c: Dict[str, Any]) -> None:
     # Mark event as corrected
     conn.execute(
         "UPDATE events SET corrected=TRUE, corrected_at=? WHERE event_id=?",
-        (c.get("corrected_at", datetime.now(timezone.utc).isoformat()), c["original_event_id"]),
+        (
+            c.get("corrected_at", datetime.now(timezone.utc).isoformat()),
+            c["original_event_id"],
+        ),
     )
 
 
@@ -524,6 +563,7 @@ def get_corrections_for_event(conn: sqlite3.Connection, event_id: str) -> List[D
 # ---------------------------------------------------------------------------
 # Message-commit map (operator panel)
 # ---------------------------------------------------------------------------
+
 
 def get_messages_page(
     conn: sqlite3.Connection,
@@ -589,8 +629,11 @@ def get_messages_page(
 
     if not msg_rows:
         return {
-            "total": total, "page": page, "limit": limit,
-            "pages": max(1, (total + limit - 1) // limit), "items": [],
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "pages": max(1, (total + limit - 1) // limit),
+            "items": [],
         }
 
     msg_ids = [r["msg_id"] for r in msg_rows]
@@ -636,14 +679,25 @@ def get_messages_page(
 def get_fleet_kpis(conn: sqlite3.Connection) -> Dict[str, Any]:
     """KPI summary: in loading, unloading, transit counts + loaded today."""
     fleet = get_fleet_state(conn)
-    in_loading = [t for t in fleet if t.get("status") == "LS" and
-                  _is_loading_site(conn, t.get("site_id"))]
-    in_unloading = [t for t in fleet if t.get("status") == "US" and
-                    not _is_loading_site(conn, t.get("site_id"))]
+    in_loading = [
+        t
+        for t in fleet
+        if t.get("status") == "LS" and _is_loading_site(conn, t.get("site_id"))
+    ]
+    in_unloading = [
+        t
+        for t in fleet
+        if t.get("status") == "US" and not _is_loading_site(conn, t.get("site_id"))
+    ]
     in_transit = [t for t in fleet if t.get("status") == "LEFT"]
 
     from datetime import datetime, timezone
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    today_start = (
+        datetime.now(timezone.utc)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .isoformat()
+    )
     loaded_today_rows = conn.execute(
         """SELECT DISTINCT truck_id FROM events
            WHERE commit_status='COMMITTED' AND status='LO'
@@ -684,7 +738,12 @@ def _is_loading_site(conn: sqlite3.Connection, site_id: Optional[str]) -> bool:
 def get_site_load_summary(conn: sqlite3.Connection) -> List[Dict]:
     """Per-site count of trolleys that completed a load (LO) and left today."""
     from datetime import datetime, timezone
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    today_start = (
+        datetime.now(timezone.utc)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .isoformat()
+    )
     rows = conn.execute(
         """SELECT s.display_name as site_name, e.site_id, COUNT(DISTINCT e.truck_id) as count
            FROM events e
@@ -708,6 +767,7 @@ def log_audit(
     triggered_by: str = "pipeline",
 ) -> None:
     from uuid import uuid4
+
     conn.execute(
         """INSERT INTO audit_log
            (log_id, action, table_name, record_id, old_value, new_value, triggered_by)
@@ -717,8 +777,12 @@ def log_audit(
             action,
             table_name,
             record_id,
-            json.dumps(old_value, ensure_ascii=False) if old_value is not None else None,
-            json.dumps(new_value, ensure_ascii=False) if new_value is not None else None,
+            json.dumps(old_value, ensure_ascii=False)
+            if old_value is not None
+            else None,
+            json.dumps(new_value, ensure_ascii=False)
+            if new_value is not None
+            else None,
             triggered_by,
         ),
     )

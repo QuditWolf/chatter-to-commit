@@ -152,6 +152,31 @@ const healthServer = http.createServer((req, res) => {
     return;
   }
 
+  // POST /send-message — plain message to group (no quote), used for summaries
+  if (req.method === "POST" && req.url === "/send-message") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { group_jid, text } = JSON.parse(body);
+        if (!activeSock || !isConnected) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "WA not connected" }));
+          return;
+        }
+        const sent = await activeSock.sendMessage(group_jid, { text });
+        const botMsgId = sent?.key?.id || null;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ sent: true, bot_message_id: botMsgId }));
+      } catch (err) {
+        console.error("[Fleet WA Listener] /send-message error:", err.message);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });

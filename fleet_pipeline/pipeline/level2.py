@@ -13,6 +13,7 @@ Fixes applied vs original:
 Usage:
     python -m fleet_pipeline.pipeline.level2 input.jsonl output.jsonl
 """
+
 import re
 import json
 import sys
@@ -42,18 +43,39 @@ class Enricher:
     ]
 
     STATUS_KEYWORDS = [
-        "enter", "ls", "lo", "left", "us", "uo",
-        "loading started", "loading over",
-        "loading", "unloaded", "unloading",
+        "enter",
+        "ls",
+        "lo",
+        "left",
+        "us",
+        "uo",
+        "loading started",
+        "loading over",
+        "loading",
+        "unloaded",
+        "unloading",
     ]
 
     NOISE_TOKENS = [
-        "respond", "please respond", "where is", "ok", "thanks", "thank you", "pls",
-        "warmup", "system warmup message"
+        "respond",
+        "please respond",
+        "where is",
+        "ok",
+        "thanks",
+        "thank you",
+        "pls",
+        "warmup",
+        "system warmup message",
     ]
 
     OPS_TOKENS = [
-        "waiting", "ready", "kept ready", "kept", "arrived", "available", "standing by"
+        "waiting",
+        "ready",
+        "kept ready",
+        "kept",
+        "arrived",
+        "available",
+        "standing by",
     ]
 
     TALLY_PATTERNS = [
@@ -72,9 +94,47 @@ class Enricher:
     # These messages are control signals, not fleet events.
     SHIFT_SIGNAL_PATTERNS = [
         re.compile(r"\bshift\s+(start|end|over|started|ended|begin|begins)\b", re.I),
-        re.compile(r"\bshift\s+\d+\b", re.I),      # "shift 1", "shift 2"
-        re.compile(r"\bs[123]\b", re.I),             # "s1", "s2", "s3"
+        re.compile(r"\bshift\s+\d+\b", re.I),  # "shift 1", "shift 2"
+        re.compile(r"\bs[123]\b", re.I),  # "s1", "s2", "s3"
         re.compile(r"\b(pehli|doosri|teesri)\s+pali\b", re.I),  # Hindi shift names
+    ]
+
+    # Summary request patterns — standalone messages asking for count/summary
+    # or announcing that loading/unloading is over for the shift.
+    SUMMARY_REQUEST_PATTERNS = [
+        re.compile(r"\btotal\s+count\b", re.I),
+        re.compile(r"\b(summary|sumary|summery)\b", re.I),
+        re.compile(r"\bsend\s+(total|count|summary)\b", re.I),
+        re.compile(r"\bhow\s+many\s+trolleys?\b", re.I),
+        re.compile(r"\b(back\s*end|backend)\s+team\b", re.I),
+        re.compile(
+            r"\bpls?\s+(report|give|send)\s+(the\s+)?(total\s+)?(count|summary)\b", re.I
+        ),
+        re.compile(
+            r"\bcount\s+(yesterday|today|this\s+shift|please|pls|so\s+far)\b", re.I
+        ),
+        re.compile(r"\btotal\s+count\s*\??$", re.I),
+        # Standalone "loading over" / "unloading over" (no truck letter before it)
+        re.compile(r"^\s*(loading|unloading)\s+over\s*$", re.I),
+        re.compile(
+            r"^\s*(loading|unloading)\s+over\s+at\s+", re.I
+        ),  # "Loading over at KN4"
+    ]
+
+    # Correction keywords — when a reply contains these, it's likely a correction
+    CORRECTION_KEYWORDS = [
+        "sorry",
+        "not ",
+        "actually",
+        "correction",
+        "it was ",
+        "my bad",
+        "oops",
+        "wrong",
+        "mistake",
+        "no it was",
+        "no,",
+        "no.",
     ]
 
     def __init__(self, config: EnricherConfig):
@@ -85,7 +145,9 @@ class Enricher:
         self.discovered_sites: Set[str] = set()
         self._history: List[Dict[str, Any]] = []
 
-    def enrich_stream(self, level1_messages: Iterable[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:
+    def enrich_stream(
+        self, level1_messages: Iterable[Dict[str, Any]]
+    ) -> Iterable[Dict[str, Any]]:
         for msg in level1_messages:
             enriched = self.enrich_message(msg)
             self._history.append(msg)
@@ -100,7 +162,9 @@ class Enricher:
         rough_sites = self.detect_sites(raw_text)
         rough_status_keywords = self.detect_status_keywords(raw_text)
         # FIX: pass full level1_msg so deleted/edited flags are checked
-        candidate_msg_type = self.classify_message_type(level1_msg, raw_text, rough_status_keywords)
+        candidate_msg_type = self.classify_message_type(
+            level1_msg, raw_text, rough_status_keywords
+        )
         lang = self.detect_language(raw_text)
 
         prev_sender_message_ids = self.prev_messages_from_sender(sender_id, ts)
@@ -111,6 +175,84 @@ class Enricher:
             "time_since_last_truck_event": self.time_since_last_truck_event(ts),
             "inactivity_window": self.inactivity_window(ts),
         }
+
+        # Reply context enrichment
+        reply_context = None
+        quoted_id = level1_msg.get("quoted_wa_message_id")
+        if quoted_id:
+            reply_context = self._get_reply_context(quoted_id)
+
+        return {
+            "msg_id": level1_msg["msg_id"],
+            "raw": level1_msg,
+            "rough_trucks": sorted(set(rough_trucks)),
+            "rough_sites": sorted(set(rough_sites)),
+            "rough_status_keywords": sorted(set(rough_status_keywords)),
+            "candidate_msg_type": candidate_msg_type,
+            "lang": lang,
+            "prev_sender_message_ids": prev_sender_message_ids,
+            "prev_truck_message_ids": prev_truck_message_ids,
+            "cursor": cursor,
+            "reply_context": reply_context,
+        }
+
+    def _get_reply_context(self, quoted_wa_message_id: str) -> Optional[Dict[str, Any]]:
+        """Look up the original message and its resolved events by quoted WA message ID.
+
+        Returns dict with:
+          - reply_to_msg_id: the quoted WA message ID
+          - reply_to_raw_text: original message text
+          - reply_to_trucks: list of truck IDs from original events
+          - reply_to_sites: list of site IDs from original events
+          - reply_to_statuses: list of statuses from original events
+        """
+        try:
+            import sqlite3
+            from fleet_pipeline.config import DB_PATH
+
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                # Get original raw message
+                orig = conn.execute(
+                    "SELECT msg_id, raw_text FROM raw_messages WHERE msg_id = ?",
+                    (quoted_wa_message_id,),
+                ).fetchone()
+                if not orig:
+                    return None
+
+                # Get events linked to the original message
+                events = conn.execute(
+                    """SELECT truck_id, truck_alias, status, site_id, site_alias
+                       FROM events
+                       WHERE msg_id = ? AND commit_status IN ('COMMITTED', 'FLAGGED')
+                       ORDER BY rowid ASC""",
+                    (orig["msg_id"],),
+                ).fetchall()
+
+                trucks = []
+                sites = []
+                statuses = []
+                for ev in events:
+                    if ev["truck_id"]:
+                        trucks.append(ev["truck_id"])
+                    if ev["truck_alias"]:
+                        trucks.append(ev["truck_alias"])
+                    if ev["site_id"]:
+                        sites.append(ev["site_id"])
+                    if ev["site_alias"]:
+                        sites.append(ev["site_alias"])
+                    if ev["status"]:
+                        statuses.append(ev["status"])
+
+                return {
+                    "reply_to_msg_id": quoted_wa_message_id,
+                    "reply_to_raw_text": orig["raw_text"] or "",
+                    "reply_to_trucks": sorted(set(trucks)),
+                    "reply_to_sites": sorted(set(sites)),
+                    "reply_to_statuses": statuses,
+                }
+        except Exception:
+            return None
 
         return {
             "msg_id": level1_msg["msg_id"],
@@ -204,6 +346,15 @@ class Enricher:
         if self.is_shift_signal(txt):
             return "SHIFT_SIGNAL"
 
+        # Summary request detection — standalone "loading over", "unloading over",
+        # or messages asking for count/summary. Must NOT contain a truck letter
+        # followed by a status keyword (those are fleet events, not summary requests).
+        has_truck_status = bool(status_keywords) and bool(self.detect_trucks(txt))
+        if not has_truck_status:
+            for pat in self.SUMMARY_REQUEST_PATTERNS:
+                if pat.search(txt):
+                    return "SUMMARY_REQUEST"
+
         # 1. Query
         if self.QUESTION_RE.search(txt):
             return "QUERY_LIKE"
@@ -261,7 +412,9 @@ class Enricher:
         last_ts = self._parse_iso_ts(self._history[-1]["timestamp_iso"])
         return int((current_ts - last_ts).total_seconds())
 
-    def time_since_last_sender(self, sender_id: Optional[str], current_ts: datetime) -> Optional[int]:
+    def time_since_last_sender(
+        self, sender_id: Optional[str], current_ts: datetime
+    ) -> Optional[int]:
         if not sender_id:
             return None
         for prev in reversed(self._history):
@@ -277,7 +430,9 @@ class Enricher:
                 return int((current_ts - prev_ts).total_seconds())
         return None
 
-    def prev_messages_from_sender(self, sender_id: Optional[str], current_ts: datetime) -> List[str]:
+    def prev_messages_from_sender(
+        self, sender_id: Optional[str], current_ts: datetime
+    ) -> List[str]:
         if not sender_id:
             return []
         window = timedelta(minutes=self.config.sender_window_minutes)
@@ -292,7 +447,9 @@ class Enricher:
                     break
         return out
 
-    def prev_messages_for_trucks(self, trucks: List[str], current_ts: datetime) -> List[str]:
+    def prev_messages_for_trucks(
+        self, trucks: List[str], current_ts: datetime
+    ) -> List[str]:
         if not trucks:
             return []
         truck_window = timedelta(minutes=self.config.truck_window_minutes)
@@ -302,7 +459,9 @@ class Enricher:
             prev_ts = self._parse_iso_ts(prev["timestamp_iso"])
             if current_ts - prev_ts > truck_window:
                 continue
-            prev_trucks_lc = {p.lower() for p in self.detect_trucks(prev.get("raw_text", "") or "")}
+            prev_trucks_lc = {
+                p.lower() for p in self.detect_trucks(prev.get("raw_text", "") or "")
+            }
             if prev_trucks_lc & trucks_lc:
                 out.append(prev["msg_id"])
                 if len(out) >= self.config.prev_limit:
@@ -343,11 +502,14 @@ def save_level2_file(level2_msgs: Iterable[Dict[str, Any]], out_path: str) -> No
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python -m fleet_pipeline.pipeline.level2 input.jsonl output.jsonl")
+        print(
+            "Usage: python -m fleet_pipeline.pipeline.level2 input.jsonl output.jsonl"
+        )
         sys.exit(1)
 
     # Build vocab from seed data truck/site aliases
     from fleet_pipeline.pipeline.registries import build_vocab_from_seed
+
     truck_vocab, site_vocab = build_vocab_from_seed()
 
     config = EnricherConfig(

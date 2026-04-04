@@ -7,6 +7,7 @@ GET  /api/ingest/status         — LLM mode / endpoint info
 POST /api/ingest/reprocess-held         — re-run messages that were HELD due to LLM being offline
 POST /api/ingest/reprocess-event/{id}  — re-run a single HELD event by event_id
 """
+
 import asyncio
 import logging
 from typing import Optional
@@ -25,12 +26,16 @@ _llm_semaphore = asyncio.Semaphore(1)
 class WAMessageRequest(BaseModel):
     wa_message_id: str
     sender_phone: str
-    sender_name: Optional[str] = None  # WhatsApp display name (pushName); falls back to sender_phone
+    sender_name: Optional[str] = (
+        None  # WhatsApp display name (pushName); falls back to sender_phone
+    )
     group_jid: str
     raw_text: str
-    received_at: str           # ISO string from Node
+    received_at: str  # ISO string from Node
     message_type: str = "fleet_event"
-    quoted_wa_message_id: Optional[str] = None  # set when operator replies to a bot message
+    quoted_wa_message_id: Optional[str] = (
+        None  # set when operator replies to a bot message
+    )
 
 
 class ManualMessageRequest(BaseModel):
@@ -43,16 +48,20 @@ class ManualMessageRequest(BaseModel):
 async def _broadcast_summary(summary: dict, source: str):
     from fleet_pipeline.api.main import ws_manager
     from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+
     invalidate_kpi_cache()
-    await ws_manager.broadcast("commit_created", {
-        "msg_id":    summary.get("msg_id", ""),
-        "raw_text":  summary.get("raw_text", ""),
-        "committed": summary.get("committed", 0),
-        "flagged":   summary.get("flagged", 0),
-        "held":      summary.get("held", 0),
-        "unmapped":  summary.get("unmapped", False),
-        "source":    source,
-    })
+    await ws_manager.broadcast(
+        "commit_created",
+        {
+            "msg_id": summary.get("msg_id", ""),
+            "raw_text": summary.get("raw_text", ""),
+            "committed": summary.get("committed", 0),
+            "flagged": summary.get("flagged", 0),
+            "held": summary.get("held", 0),
+            "unmapped": summary.get("unmapped", False),
+            "source": source,
+        },
+    )
     if summary.get("committed", 0) > 0:
         await ws_manager.broadcast("fleet_state_updated", {"source": source})
     if summary.get("hitl_created", 0) > 0:
@@ -60,9 +69,15 @@ async def _broadcast_summary(summary: dict, source: str):
 
 
 async def _process_and_broadcast(
-    raw_text: str, sender_name: str, sender_id: str,
-    timestamp_iso: Optional[str], source: str, msg_id: Optional[str] = None,
-    wa_message_id: Optional[str] = None, group_jid: Optional[str] = None,
+    raw_text: str,
+    sender_name: str,
+    sender_id: str,
+    timestamp_iso: Optional[str],
+    source: str,
+    msg_id: Optional[str] = None,
+    wa_message_id: Optional[str] = None,
+    group_jid: Optional[str] = None,
+    quoted_wa_message_id: Optional[str] = None,
 ):
     """Run pipeline and broadcast result. Used as a background task.
 
@@ -73,6 +88,7 @@ async def _process_and_broadcast(
     from functools import partial
     from fleet_pipeline.api.pipeline_service import process_raw_text
     from fleet_pipeline.api.main import ws_manager
+
     try:
         async with _llm_semaphore:
             loop = asyncio.get_event_loop()
@@ -87,6 +103,7 @@ async def _process_and_broadcast(
                     source=source,
                     wa_message_id=wa_message_id,
                     group_jid=group_jid,
+                    quoted_wa_message_id=quoted_wa_message_id,
                 ),
             )
         # If a pending msg_id was known up front, attach it so frontend can correlate
@@ -95,9 +112,14 @@ async def _process_and_broadcast(
         await _broadcast_summary(summary, source)
     except Exception as exc:
         log.error("Background pipeline error: %s", exc)
-        await ws_manager.broadcast("commit_error", {
-            "raw_text": raw_text, "error": str(exc)[:200], "source": source,
-        })
+        await ws_manager.broadcast(
+            "commit_error",
+            {
+                "raw_text": raw_text,
+                "error": str(exc)[:200],
+                "source": source,
+            },
+        )
 
 
 @router.post("/wa-message", status_code=202)
@@ -121,8 +143,14 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
                 """INSERT OR IGNORE INTO wa_messages
                    (wa_message_id, sender_phone, group_jid, raw_text, received_at, message_type, processed)
                    VALUES (?, ?, ?, ?, ?, ?, 0)""",
-                (req.wa_message_id, req.sender_phone, req.group_jid,
-                 req.raw_text, req.received_at, req.message_type),
+                (
+                    req.wa_message_id,
+                    req.sender_phone,
+                    req.group_jid,
+                    req.raw_text,
+                    req.received_at,
+                    req.message_type,
+                ),
             )
         except Exception:
             pass
@@ -140,16 +168,23 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
                 answered_by=req.sender_phone,
                 group_jid=req.group_jid,
             )
-            return {"queued": True, "routed_as": "hitl_answer", "question_id": hitl_q["question_id"]}
+            return {
+                "queued": True,
+                "routed_as": "hitl_answer",
+                "question_id": hitl_q["question_id"],
+            }
 
     # ── Normal pipeline ───────────────────────────────────────────────────────
-    await ws_manager.broadcast("message_received", {
-        "wa_message_id": req.wa_message_id,
-        "raw_text": req.raw_text,
-        "sender": req.sender_phone,
-        "timestamp_iso": req.received_at,
-        "source": "whatsapp",
-    })
+    await ws_manager.broadcast(
+        "message_received",
+        {
+            "wa_message_id": req.wa_message_id,
+            "raw_text": req.raw_text,
+            "sender": req.sender_phone,
+            "timestamp_iso": req.received_at,
+            "source": "whatsapp",
+        },
+    )
 
     background_tasks.add_task(
         _process_and_broadcast,
@@ -161,6 +196,7 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
         msg_id=req.wa_message_id,
         wa_message_id=req.wa_message_id,
         group_jid=req.group_jid,
+        quoted_wa_message_id=req.quoted_wa_message_id,
     )
 
     return {"queued": True, "wa_message_id": req.wa_message_id}
@@ -200,12 +236,18 @@ async def _handle_wa_hitl_answer(
             ack = "✅ Clarification received — re-processing message…"
         _post_send_reply(group_jid, ack, question.get("bot_wa_message_id"))
 
-        await ws_manager.broadcast("hitl_answered_wa", {
-            "question_id": question_id, "answer": answer_text,
-        })
+        await ws_manager.broadcast(
+            "hitl_answered_wa",
+            {
+                "question_id": question_id,
+                "answer": answer_text,
+            },
+        )
     except Exception as exc:
         log.error("WA HITL answer error: %s", exc)
-        _post_send_reply(group_jid, f"⚠️ Error processing answer: {str(exc)[:100]}", None)
+        _post_send_reply(
+            group_jid, f"⚠️ Error processing answer: {str(exc)[:100]}", None
+        )
 
 
 @router.post("/manual", status_code=202)
@@ -223,13 +265,16 @@ async def ingest_manual(req: ManualMessageRequest, background_tasks: BackgroundT
     timestamp = req.timestamp_iso or datetime.now(timezone.utc).isoformat()
 
     # Broadcast immediately so frontend shows pending state in message map
-    await ws_manager.broadcast("message_received", {
-        "wa_message_id": temp_id,
-        "raw_text": req.text,
-        "sender": req.sender_name or "operator",
-        "timestamp_iso": timestamp,
-        "source": "manual",
-    })
+    await ws_manager.broadcast(
+        "message_received",
+        {
+            "wa_message_id": temp_id,
+            "raw_text": req.text,
+            "sender": req.sender_name or "operator",
+            "timestamp_iso": timestamp,
+            "source": "manual",
+        },
+    )
 
     # Process in background — same path as WA messages.
     # Pass wa_message_id=temp_id so the DB msg_id matches the pending key the
@@ -281,6 +326,7 @@ async def reprocess_held():
         from functools import partial
         from fleet_pipeline.api.pipeline_service import process_raw_text
         from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+
         loop = asyncio.get_event_loop()
         count = 0
         for m in msgs:
@@ -298,20 +344,26 @@ async def reprocess_held():
                 )
                 count += 1
                 invalidate_kpi_cache()
-                await ws_manager.broadcast("commit_created", {
-                    "msg_id":    summary.get("msg_id", ""),
-                    "raw_text":  summary.get("raw_text", ""),
-                    "committed": summary.get("committed", 0),
-                    "flagged":   summary.get("flagged", 0),
-                    "held":      summary.get("held", 0),
-                    "source":    "reprocess",
-                })
+                await ws_manager.broadcast(
+                    "commit_created",
+                    {
+                        "msg_id": summary.get("msg_id", ""),
+                        "raw_text": summary.get("raw_text", ""),
+                        "committed": summary.get("committed", 0),
+                        "flagged": summary.get("flagged", 0),
+                        "held": summary.get("held", 0),
+                        "source": "reprocess",
+                    },
+                )
             except Exception as exc:
                 log.warning("Reprocess failed for %s: %s", m["msg_id"], exc)
         await ws_manager.broadcast("reprocess_complete", {"count": count})
 
     asyncio.create_task(_run_all())
-    return {"reprocessed": len(msgs), "message": f"Reprocessing {len(msgs)} held messages in background"}
+    return {
+        "reprocessed": len(msgs),
+        "message": f"Reprocessing {len(msgs)} held messages in background",
+    }
 
 
 @router.post("/reprocess-event/{event_id}")
@@ -338,6 +390,7 @@ async def reprocess_single_event(event_id: str):
 
     if not row:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=404, detail="HELD event not found")
 
     m = dict(row)
@@ -346,6 +399,7 @@ async def reprocess_single_event(event_id: str):
         from functools import partial
         from fleet_pipeline.api.pipeline_service import process_raw_text
         from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+
         loop = asyncio.get_event_loop()
         try:
             summary = await loop.run_in_executor(
@@ -360,18 +414,23 @@ async def reprocess_single_event(event_id: str):
                 ),
             )
             invalidate_kpi_cache()
-            await ws_manager.broadcast("commit_created", {
-                "msg_id":    summary.get("msg_id", ""),
-                "raw_text":  summary.get("raw_text", ""),
-                "committed": summary.get("committed", 0),
-                "flagged":   summary.get("flagged", 0),
-                "held":      summary.get("held", 0),
-                "source":    "reprocess",
-            })
+            await ws_manager.broadcast(
+                "commit_created",
+                {
+                    "msg_id": summary.get("msg_id", ""),
+                    "raw_text": summary.get("raw_text", ""),
+                    "committed": summary.get("committed", 0),
+                    "flagged": summary.get("flagged", 0),
+                    "held": summary.get("held", 0),
+                    "source": "reprocess",
+                },
+            )
             await ws_manager.broadcast("reprocess_complete", {"count": 1})
         except Exception as exc:
             log.warning("Reprocess failed for event %s: %s", event_id, exc)
-            await ws_manager.broadcast("reprocess_complete", {"count": 0, "error": str(exc)})
+            await ws_manager.broadcast(
+                "reprocess_complete", {"count": 0, "error": str(exc)}
+            )
 
     asyncio.create_task(_run())
     return {"reprocessed": 1, "message": f"Reprocessing event {event_id} in background"}
@@ -397,6 +456,7 @@ async def reprocess_message_by_id(msg_id: str):
 
     if not row:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=404, detail="Message not found")
 
     m = dict(row)
@@ -405,6 +465,7 @@ async def reprocess_message_by_id(msg_id: str):
         from functools import partial
         from fleet_pipeline.api.pipeline_service import process_raw_text
         from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+
         loop = asyncio.get_event_loop()
         try:
             summary = await loop.run_in_executor(
@@ -419,18 +480,23 @@ async def reprocess_message_by_id(msg_id: str):
                 ),
             )
             invalidate_kpi_cache()
-            await ws_manager.broadcast("commit_created", {
-                "msg_id":    summary.get("msg_id", ""),
-                "raw_text":  summary.get("raw_text", ""),
-                "committed": summary.get("committed", 0),
-                "flagged":   summary.get("flagged", 0),
-                "held":      summary.get("held", 0),
-                "source":    "reprocess",
-            })
+            await ws_manager.broadcast(
+                "commit_created",
+                {
+                    "msg_id": summary.get("msg_id", ""),
+                    "raw_text": summary.get("raw_text", ""),
+                    "committed": summary.get("committed", 0),
+                    "flagged": summary.get("flagged", 0),
+                    "held": summary.get("held", 0),
+                    "source": "reprocess",
+                },
+            )
             await ws_manager.broadcast("reprocess_complete", {"count": 1})
         except Exception as exc:
             log.warning("Reprocess failed for msg %s: %s", msg_id, exc)
-            await ws_manager.broadcast("reprocess_complete", {"count": 0, "error": str(exc)})
+            await ws_manager.broadcast(
+                "reprocess_complete", {"count": 0, "error": str(exc)}
+            )
 
     asyncio.create_task(_run())
     return {"reprocessed": 1, "message": f"Reprocessing message {msg_id} in background"}
@@ -440,6 +506,7 @@ async def reprocess_message_by_id(msg_id: str):
 def ingest_status():
     """Returns current LLM mode and endpoint config (no secrets)."""
     from fleet_pipeline.config import LLM_MOCK, LLM_BASE_URL, MODEL_NAME
+
     if LLM_MOCK:
         mode = "mock"
         endpoint = None

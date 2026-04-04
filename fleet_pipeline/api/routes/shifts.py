@@ -7,11 +7,16 @@ POST /api/shifts/start    — operator: force-start a new shift now
 POST /api/shifts/end      — operator: end the current shift
 POST /api/shifts/resume   — operator: reopen the most recently ended shift
 """
+
 from fastapi import APIRouter, HTTPException
 
 from fleet_pipeline.config import DB_PATH
 from fleet_pipeline.db import database as db
-from fleet_pipeline.pipeline.shift_detector import operator_start, operator_end, operator_resume
+from fleet_pipeline.pipeline.shift_detector import (
+    operator_start,
+    operator_end,
+    operator_resume,
+)
 
 router = APIRouter(prefix="/api/shifts", tags=["shifts"])
 
@@ -49,6 +54,7 @@ def current_shift():
 async def shift_start():
     """Force-start a new shift immediately."""
     from fleet_pipeline.api.main import ws_manager
+
     shift = operator_start(DB_PATH)
     await ws_manager.broadcast("shift_changed", {"action": "start", "shift": shift})
     return {"shift": shift}
@@ -56,12 +62,22 @@ async def shift_start():
 
 @router.post("/end")
 async def shift_end():
-    """End the currently active shift."""
+    """End the currently active shift. Posts summary to WA group."""
     from fleet_pipeline.api.main import ws_manager
+    from fleet_pipeline.config import WA_GROUP_JID
+
     ended = operator_end(DB_PATH)
     if not ended:
         raise HTTPException(status_code=400, detail="No active shift to end")
     await ws_manager.broadcast("shift_changed", {"action": "end"})
+    # Post summary to WA group before the shift ends
+    if WA_GROUP_JID:
+        try:
+            from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group
+
+            send_summary_to_group(WA_GROUP_JID, DB_PATH)
+        except Exception as _exc:
+            pass  # don't fail the shift end if summary posting fails
     return {"ended": True}
 
 
@@ -69,6 +85,7 @@ async def shift_end():
 async def shift_resume():
     """Reopen the most recently ended shift."""
     from fleet_pipeline.api.main import ws_manager
+
     shift = operator_resume(DB_PATH)
     if not shift:
         raise HTTPException(status_code=400, detail="No previous shift to resume")

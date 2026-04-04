@@ -10,6 +10,7 @@ PUT  /api/registry/sites/:id
 GET  /api/registry/shifts-config
 PUT  /api/registry/shifts-config/:shift_number
 """
+
 import json
 from typing import List, Optional
 
@@ -24,27 +25,32 @@ router = APIRouter(prefix="/api/registry", tags=["registry"])
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
 
+
 class TruckCreate(BaseModel):
     truck_id: str
     display_name: str
     aliases: List[str] = []
+
 
 class TruckUpdate(BaseModel):
     display_name: Optional[str] = None
     aliases: Optional[List[str]] = None
     is_active: Optional[bool] = None
 
+
 class SiteCreate(BaseModel):
     site_id: str
     display_name: str
-    site_type: str   # loading | unloading | depot
+    site_type: str  # loading | unloading | depot
     aliases: List[str] = []
+
 
 class SiteUpdate(BaseModel):
     display_name: Optional[str] = None
     site_type: Optional[str] = None
     aliases: Optional[List[str]] = None
     is_active: Optional[bool] = None
+
 
 class ShiftConfigUpdate(BaseModel):
     start_time: str
@@ -53,6 +59,7 @@ class ShiftConfigUpdate(BaseModel):
 
 
 # ── Trucks ───────────────────────────────────────────────────────────────────
+
 
 @router.get("/trucks")
 def list_trucks():
@@ -77,7 +84,9 @@ def create_truck(req: TruckCreate):
             "SELECT truck_id FROM trucks WHERE truck_id=?", (req.truck_id,)
         ).fetchone()
         if existing:
-            raise HTTPException(status_code=409, detail=f"Truck {req.truck_id!r} already exists")
+            raise HTTPException(
+                status_code=409, detail=f"Truck {req.truck_id!r} already exists"
+            )
         db.create_truck(conn, req.truck_id, req.display_name, req.aliases)
     return {"truck_id": req.truck_id, "created": True}
 
@@ -85,7 +94,9 @@ def create_truck(req: TruckCreate):
 @router.put("/trucks/{truck_id}")
 def update_truck(truck_id: str, req: TruckUpdate):
     with db.db_conn(DB_PATH) as conn:
-        row = conn.execute("SELECT * FROM trucks WHERE truck_id=?", (truck_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM trucks WHERE truck_id=?", (truck_id,)
+        ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Truck {truck_id!r} not found")
 
@@ -106,7 +117,29 @@ def update_truck(truck_id: str, req: TruckUpdate):
     return {"truck_id": truck_id, "updated": True}
 
 
+@router.delete("/trucks/{truck_id}")
+def delete_truck(truck_id: str):
+    with db.db_conn(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT truck_id FROM trucks WHERE truck_id=?", (truck_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Truck {truck_id!r} not found")
+        # Check for dependent events
+        dep = conn.execute(
+            "SELECT COUNT(*) as cnt FROM events WHERE truck_id=?", (truck_id,)
+        ).fetchone()
+        if dep and dep["cnt"] > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot delete truck {truck_id!r}: {dep['cnt']} event(s) reference it. Deactivate instead.",
+            )
+        conn.execute("DELETE FROM trucks WHERE truck_id=?", (truck_id,))
+    return {"truck_id": truck_id, "deleted": True}
+
+
 # ── Sites ────────────────────────────────────────────────────────────────────
+
 
 @router.get("/sites")
 def list_sites():
@@ -131,14 +164,19 @@ def create_site(req: SiteCreate):
             "SELECT site_id FROM sites WHERE site_id=?", (req.site_id,)
         ).fetchone()
         if existing:
-            raise HTTPException(status_code=409, detail=f"Site {req.site_id!r} already exists")
-        db.insert_site(conn, {
-            "site_id": req.site_id,
-            "display_name": req.display_name,
-            "site_type": req.site_type,
-            "aliases": req.aliases,
-            "is_active": True,
-        })
+            raise HTTPException(
+                status_code=409, detail=f"Site {req.site_id!r} already exists"
+            )
+        db.insert_site(
+            conn,
+            {
+                "site_id": req.site_id,
+                "display_name": req.display_name,
+                "site_type": req.site_type,
+                "aliases": req.aliases,
+                "is_active": True,
+            },
+        )
     return {"site_id": req.site_id, "created": True}
 
 
@@ -168,7 +206,34 @@ def update_site(site_id: str, req: SiteUpdate):
     return {"site_id": site_id, "updated": True}
 
 
+@router.delete("/sites/{site_id}")
+def delete_site(site_id: str):
+    with db.db_conn(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT site_id FROM sites WHERE site_id=?", (site_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Site {site_id!r} not found")
+        dep_events = conn.execute(
+            "SELECT COUNT(*) as cnt FROM events WHERE site_id=?", (site_id,)
+        ).fetchone()
+        dep_tallies = conn.execute(
+            "SELECT COUNT(*) as cnt FROM tallies WHERE site_id=?", (site_id,)
+        ).fetchone()
+        total_deps = (dep_events["cnt"] if dep_events else 0) + (
+            dep_tallies["cnt"] if dep_tallies else 0
+        )
+        if total_deps > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot delete site {site_id!r}: {total_deps} record(s) reference it. Deactivate instead.",
+            )
+        conn.execute("DELETE FROM sites WHERE site_id=?", (site_id,))
+    return {"site_id": site_id, "deleted": True}
+
+
 # ── Shift config ─────────────────────────────────────────────────────────────
+
 
 @router.get("/shifts-config")
 def get_shifts_config():
@@ -181,9 +246,14 @@ def get_shifts_config():
 def update_shift_config_route(shift_number: int, req: ShiftConfigUpdate):
     with db.db_conn(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT shift_number FROM shift_config WHERE shift_number=?", (shift_number,)
+            "SELECT shift_number FROM shift_config WHERE shift_number=?",
+            (shift_number,),
         ).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail=f"Shift {shift_number} not found in config")
-        db.update_shift_config(conn, shift_number, req.start_time, req.expected_end, req.wa_keyword)
+            raise HTTPException(
+                status_code=404, detail=f"Shift {shift_number} not found in config"
+            )
+        db.update_shift_config(
+            conn, shift_number, req.start_time, req.expected_end, req.wa_keyword
+        )
     return {"shift_number": shift_number, "updated": True}

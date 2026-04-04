@@ -5,6 +5,7 @@ Safe to run multiple times (catches 'duplicate column' errors).
 Run:
     python -m fleet_pipeline.db.migrate
 """
+
 import sqlite3
 import sys
 import os
@@ -15,7 +16,9 @@ from fleet_pipeline.config import DB_PATH
 from fleet_pipeline.db.database import init_db
 
 
-def _add_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+def _add_column(
+    conn: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         print(f"  + {table}.{column}")
@@ -37,7 +40,7 @@ def run_migrations(db_path: str = DB_PATH) -> None:
 
         print("\n[events] Adding new columns...")
         _add_column(conn, "events", "wa_message_id", "TEXT")
-        _add_column(conn, "events", "commit_path", "TEXT")       # green | amber | red
+        _add_column(conn, "events", "commit_path", "TEXT")  # green | amber | red
         _add_column(conn, "events", "corrected", "BOOLEAN DEFAULT FALSE")
         _add_column(conn, "events", "corrected_at", "TIMESTAMP")
         _add_column(conn, "events", "shift_id", "TEXT")
@@ -47,6 +50,9 @@ def run_migrations(db_path: str = DB_PATH) -> None:
 
         print("\n[hitl_queue] Adding new columns...")
         _add_column(conn, "hitl_queue", "wa_message_id", "TEXT")
+
+        print("\n[raw_messages] Adding new columns...")
+        _add_column(conn, "raw_messages", "quoted_wa_message_id", "TEXT")
 
         conn.commit()
 
