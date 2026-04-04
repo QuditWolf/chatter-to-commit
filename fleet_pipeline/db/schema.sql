@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS events (
     corrects_event_id  TEXT REFERENCES events(event_id),
     processing_id      TEXT,
     simulation_run_id  TEXT REFERENCES simulation_runs(run_id),
+    wa_message_id      TEXT,                  -- original WA msg ID (added via migration)
+    commit_path        TEXT,                  -- green | amber | red (added via migration)
+    corrected          BOOLEAN DEFAULT FALSE,  -- (added via migration)
+    corrected_at       TIMESTAMP,             -- (added via migration)
+    shift_id           TEXT,                  -- (added via migration)
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -133,6 +138,7 @@ CREATE TABLE IF NOT EXISTS shifts (
     started_at       TIMESTAMP NOT NULL,
     ended_at         TIMESTAMP,
     detection_method TEXT DEFAULT 'time_based',  -- time_based | wa_signal | manual
+    shift_name       TEXT,                       -- added via migration
     notes            TEXT,
     simulation_run_id TEXT REFERENCES simulation_runs(run_id),
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP

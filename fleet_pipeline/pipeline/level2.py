@@ -254,19 +254,6 @@ class Enricher:
         except Exception:
             return None
 
-        return {
-            "msg_id": level1_msg["msg_id"],
-            "raw": level1_msg,
-            "rough_trucks": sorted(set(rough_trucks)),
-            "rough_sites": sorted(set(rough_sites)),
-            "rough_status_keywords": sorted(set(rough_status_keywords)),
-            "candidate_msg_type": candidate_msg_type,
-            "lang": lang,
-            "prev_sender_message_ids": prev_sender_message_ids,
-            "prev_truck_message_ids": prev_truck_message_ids,
-            "cursor": cursor,
-        }
-
     def detect_trucks(self, text: str) -> List[str]:
         found: Set[str] = set()
 

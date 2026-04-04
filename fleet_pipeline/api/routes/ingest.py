@@ -331,17 +331,19 @@ async def reprocess_held():
         count = 0
         for m in msgs:
             try:
-                summary = await loop.run_in_executor(
-                    None,
-                    partial(
-                        process_raw_text,
-                        raw_text=m["raw_text"],
-                        sender_name=m["sender_name"] or "unknown",
-                        sender_id=m["sender_id"] or "unknown",
-                        timestamp_iso=m["timestamp_iso"],
-                        source=m["source_file"] or "reprocess",
-                    ),
-                )
+                # Use the same semaphore as normal processing to serialize LLM calls
+                async with _llm_semaphore:
+                    summary = await loop.run_in_executor(
+                        None,
+                        partial(
+                            process_raw_text,
+                            raw_text=m["raw_text"],
+                            sender_name=m["sender_name"] or "unknown",
+                            sender_id=m["sender_id"] or "unknown",
+                            timestamp_iso=m["timestamp_iso"],
+                            source=m["source_file"] or "reprocess",
+                        ),
+                    )
                 count += 1
                 invalidate_kpi_cache()
                 await ws_manager.broadcast(
@@ -402,17 +404,18 @@ async def reprocess_single_event(event_id: str):
 
         loop = asyncio.get_event_loop()
         try:
-            summary = await loop.run_in_executor(
-                None,
-                partial(
-                    process_raw_text,
-                    raw_text=m["raw_text"],
-                    sender_name=m["sender_name"] or "unknown",
-                    sender_id=m["sender_id"] or "unknown",
-                    timestamp_iso=m["timestamp_iso"],
-                    source=m["source_file"] or "reprocess",
-                ),
-            )
+            async with _llm_semaphore:
+                summary = await loop.run_in_executor(
+                    None,
+                    partial(
+                        process_raw_text,
+                        raw_text=m["raw_text"],
+                        sender_name=m["sender_name"] or "unknown",
+                        sender_id=m["sender_id"] or "unknown",
+                        timestamp_iso=m["timestamp_iso"],
+                        source=m["source_file"] or "reprocess",
+                    ),
+                )
             invalidate_kpi_cache()
             await ws_manager.broadcast(
                 "commit_created",
@@ -468,17 +471,18 @@ async def reprocess_message_by_id(msg_id: str):
 
         loop = asyncio.get_event_loop()
         try:
-            summary = await loop.run_in_executor(
-                None,
-                partial(
-                    process_raw_text,
-                    raw_text=m["raw_text"],
-                    sender_name=m["sender_name"] or "unknown",
-                    sender_id=m["sender_id"] or "unknown",
-                    timestamp_iso=m["timestamp_iso"],
-                    source=m["source_file"] or "reprocess",
-                ),
-            )
+            async with _llm_semaphore:
+                summary = await loop.run_in_executor(
+                    None,
+                    partial(
+                        process_raw_text,
+                        raw_text=m["raw_text"],
+                        sender_name=m["sender_name"] or "unknown",
+                        sender_id=m["sender_id"] or "unknown",
+                        timestamp_iso=m["timestamp_iso"],
+                        source=m["source_file"] or "reprocess",
+                    ),
+                )
             invalidate_kpi_cache()
             await ws_manager.broadcast(
                 "commit_created",

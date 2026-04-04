@@ -217,16 +217,13 @@ def delete_site(site_id: str):
         dep_events = conn.execute(
             "SELECT COUNT(*) as cnt FROM events WHERE site_id=?", (site_id,)
         ).fetchone()
-        dep_tallies = conn.execute(
-            "SELECT COUNT(*) as cnt FROM tallies WHERE site_id=?", (site_id,)
-        ).fetchone()
-        total_deps = (dep_events["cnt"] if dep_events else 0) + (
-            dep_tallies["cnt"] if dep_tallies else 0
-        )
+        # Note: tallies table does NOT have a site_id column,
+        # so we only check events for dependencies
+        total_deps = dep_events["cnt"] if dep_events else 0
         if total_deps > 0:
             raise HTTPException(
                 status_code=409,
-                detail=f"Cannot delete site {site_id!r}: {total_deps} record(s) reference it. Deactivate instead.",
+                detail=f"Cannot delete site {site_id!r}: {total_deps} event(s) reference it. Deactivate instead.",
             )
         conn.execute("DELETE FROM sites WHERE site_id=?", (site_id,))
     return {"site_id": site_id, "deleted": True}
