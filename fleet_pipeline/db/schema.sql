@@ -161,6 +161,21 @@ CREATE TABLE IF NOT EXISTS corrections (
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- LLM raw output archive — forensic recovery for every LLM call.
+-- Stores the unparsed LLM text alongside the parsed result so that
+-- if the parser or sanitizer makes a mistake, the original output
+-- can be re-examined and re-parsed.
+CREATE TABLE IF NOT EXISTS llm_outputs (
+    output_id          TEXT PRIMARY KEY,
+    msg_id             TEXT REFERENCES raw_messages(msg_id),
+    raw_llm_text       TEXT,                  -- unparsed LLM output (may be malformed)
+    parsed_json        TEXT,                  -- JSON after parsing + sanitization
+    sanitizer_issues   TEXT,                  -- JSON array of sanitization findings
+    model_name         TEXT,
+    prompt_hash        TEXT,                  -- SHA-256 of prompt (dedup detection)
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_events_truck_id ON events(truck_id);
 CREATE INDEX IF NOT EXISTS idx_events_msg_id ON events(msg_id);
@@ -168,6 +183,8 @@ CREATE INDEX IF NOT EXISTS idx_events_commit_status ON events(commit_status);
 CREATE INDEX IF NOT EXISTS idx_events_simulation_run ON events(simulation_run_id);
 CREATE INDEX IF NOT EXISTS idx_hitl_status ON hitl_queue(status);
 CREATE INDEX IF NOT EXISTS idx_raw_messages_timestamp ON raw_messages(timestamp_iso);
+CREATE INDEX IF NOT EXISTS idx_raw_messages_quoted ON raw_messages(quoted_wa_message_id);
 CREATE INDEX IF NOT EXISTS idx_wa_messages_received ON wa_messages(received_at);
 CREATE INDEX IF NOT EXISTS idx_shifts_started ON shifts(started_at);
 CREATE INDEX IF NOT EXISTS idx_corrections_event ON corrections(original_event_id);
+CREATE INDEX IF NOT EXISTS idx_llm_outputs_msg ON llm_outputs(msg_id);

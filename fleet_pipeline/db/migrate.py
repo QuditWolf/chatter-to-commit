@@ -54,6 +54,30 @@ def run_migrations(db_path: str = DB_PATH) -> None:
         print("\n[raw_messages] Adding new columns...")
         _add_column(conn, "raw_messages", "quoted_wa_message_id", "TEXT")
 
+        print("\n[llm_outputs] Creating table...")
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS llm_outputs (
+                    output_id          TEXT PRIMARY KEY,
+                    msg_id             TEXT REFERENCES raw_messages(msg_id),
+                    raw_llm_text       TEXT,
+                    parsed_json        TEXT,
+                    sanitizer_issues   TEXT,
+                    model_name         TEXT,
+                    prompt_hash        TEXT,
+                    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_outputs_msg ON llm_outputs(msg_id)"
+            )
+            print("  + llm_outputs table created")
+        except sqlite3.OperationalError as e:
+            if "already exists" in str(e).lower():
+                print("  = llm_outputs (already exists)")
+            else:
+                raise
+
         conn.commit()
 
     print("\nMigrations complete.")

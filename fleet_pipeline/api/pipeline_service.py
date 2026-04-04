@@ -8,6 +8,7 @@ The processor is initialised lazily on first use so the API starts instantly
 even if the LLM endpoint is not yet reachable.
 """
 
+import json
 import logging
 import threading
 import time
@@ -265,6 +266,7 @@ def process_raw_text(
                 "overall_confidence": result.get("overall_confidence"),
                 "commit_recommendation": result.get("commit_recommendation"),
                 "events_parsed": len(result.get("events", [])),
+                "sanitization_issues": result.get("_sanitization_issues", []),
             },
             "commit": {
                 "committed": summary.get("committed", 0),
@@ -278,5 +280,32 @@ def process_raw_text(
             "duration_ms": round((time.monotonic() - _t_start) * 1000),
         }
     )
+
+    # Archive LLM output for forensic recovery
+    if l3_raw_output or llm_error:
+        try:
+            import hashlib as _hashlib
+
+            prompt_hash = _hashlib.sha256(
+                (l3_prompt or "").encode("utf-8")
+            ).hexdigest()[:16]
+            with db.db_conn(DB_PATH) as _llm_conn:
+                _llm_conn.execute(
+                    """INSERT OR IGNORE INTO llm_outputs
+                       (output_id, msg_id, raw_llm_text, parsed_json,
+                        sanitizer_issues, model_name, prompt_hash)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        str(uuid4()),
+                        msg_id,
+                        l3_raw_output,
+                        json.dumps(result, default=str, ensure_ascii=False)[:50000],
+                        json.dumps(result.get("_sanitization_issues", [])),
+                        MODEL_NAME,
+                        prompt_hash,
+                    ),
+                )
+        except Exception as _exc:
+            log.warning("Failed to archive LLM output: %s", _exc)
 
     return summary

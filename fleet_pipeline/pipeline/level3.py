@@ -508,6 +508,18 @@ class Level3Processor:
 
         parsed = parse_llm_output(raw_output)
 
+        # ── Sanitize LLM output — defensive layer against injection/pollution ──
+        from fleet_pipeline.pipeline.sanitizer import sanitize_llm_output
+
+        parsed, sanitization_issues = sanitize_llm_output(
+            parsed,
+            raw_llm_text=raw_output or "",
+            level2_msg=level2_msg,
+        )
+        # Attach sanitization findings for audit logging
+        if sanitization_issues:
+            parsed["_sanitization_issues"] = [i.to_dict() for i in sanitization_issues]
+
         # Inject pipeline metadata (not from LLM)
         parsed["raw_message"] = prompt_obj["raw"]
         parsed["level2_meta"] = prompt_obj["l2_meta"]
