@@ -33,7 +33,8 @@ from typing import Optional
 from uuid import uuid4
 import re
 
-INACTIVITY_GAP = 3600  # seconds — 1 hour
+INACTIVITY_GAP = 10800  # seconds — 3 hours (auto-starts a new shift on next message)
+AUTO_END_GAP   = 10800  # seconds — 3 hours (background task closes shift with no activity)
 
 
 # ── WA signal patterns ────────────────────────────────────────────────────────
@@ -45,6 +46,8 @@ _SHIFT_START_RE = [
 ]
 _SHIFT_END_RE = [
     re.compile(r"\bshift\s+(end|over|ended|finish|done|khatam)\b", re.I),
+    # Standalone "Loading Over" message signals end of loading session → end shift
+    re.compile(r"^\s*loading\s+over\s*$", re.I),
 ]
 
 

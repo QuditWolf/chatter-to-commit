@@ -35,7 +35,7 @@ restart-wa:
 # Wipe WA session and re-authenticate
 reset-wa-session:
 	docker compose stop wa
-	docker volume rm $$(docker compose config --volumes | grep wa_session) 2>/dev/null || true
+	docker volume rm 02_truck_fleet_wa_session 2>/dev/null || true
 	docker compose up -d wa
 	docker compose logs -f wa
 

@@ -175,7 +175,10 @@ def process_raw_text(
         result["shift_id"] = shift_id
 
     # Commit
-    committer = Committer(db_path=DB_PATH, wa_message_id=wa_message_id, group_jid=group_jid)
+    committer = Committer(
+        db_path=DB_PATH, wa_message_id=wa_message_id,
+        group_jid=group_jid, sender_id=sender_id,
+    )
     summary = committer.commit(result)
     summary["msg_id"] = msg_id
     summary["raw_text"] = raw_text

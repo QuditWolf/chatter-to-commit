@@ -102,33 +102,212 @@ def strip_markdown_fences(text: str) -> str:
     return text.strip()
 
 
+def _extract_partial_events(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Last-resort recovery for truncated or hallucination-corrupted LLM output.
+    Walks the events array character-by-character, extracts each balanced
+    { } block, parses it independently, and drops hallucinated null-truck entries.
+    Returns a minimal valid result dict, or None if no usable events were found.
+    """
+    _PARTIAL_MSG_ALIASES = {
+        "truck": "STATUS_UPDATE", "truck_update": "STATUS_UPDATE",
+        "status": "STATUS_UPDATE", "status_update": "STATUS_UPDATE",
+        "tally": "TALLY_UPDATE", "tally_update": "TALLY_UPDATE",
+    }
+    msg_type_m = re.search(r'"msg_type"\s*:\s*"([^"]+)"', text)
+    raw_msg_type = msg_type_m.group(1) if msg_type_m else "STATUS_UPDATE"
+    msg_type = _PARTIAL_MSG_ALIASES.get(raw_msg_type.lower(), raw_msg_type)
+
+    conf_m = re.search(r'"overall_confidence"\s*:\s*([\d.]+)', text)
+    overall_conf = float(conf_m.group(1)) if conf_m else 0.55
+
+    # Try both "commit_recommendation" and short-form "commit" key
+    rec_m = re.search(r'"commit_recommendation"\s*:\s*"([^"]+)"', text)
+    if not rec_m:
+        rec_m = re.search(r'"commit"\s*:\s*"([^"]+)"', text)
+    commit_rec = rec_m.group(1) if rec_m else "COMMIT_FLAG"
+
+    # Locate the events array and iterate over balanced { } blocks inside it
+    events_m = re.search(r'"events"\s*:\s*\[', text)
+    if not events_m:
+        # Flat-JSON recovery: model emitted truck/status fields at top level
+        # (happens with multi-truck messages — duplicate keys, no events array)
+        truck_id_matches = list(re.finditer(r'"truck_id"\s*:\s*"([^"]*)"', text))
+        if truck_id_matches:
+            flat_events: list = []
+            boundaries = [m.start() for m in truck_id_matches] + [len(text)]
+            for idx, m in enumerate(truck_id_matches):
+                slice_text = text[boundaries[idx]:boundaries[idx + 1]]
+                tid = m.group(1)
+                if not tid or tid == "null":
+                    continue
+                alias_m2 = re.search(r'"truck_alias"\s*:\s*"([^"]*)"', slice_text)
+                status_m2 = re.search(r'"status"\s*:\s*"([^"]*)"', slice_text)
+                site_id_m2 = re.search(r'"site_id"\s*:\s*"([^"]*)"', slice_text)
+                site_alias_m2 = re.search(r'"site_alias"\s*:\s*"([^"]*)"', slice_text)
+                conf_m2 = re.search(r'"confidence"\s*:\s*([\d.]+)', slice_text)
+                inferred_m2 = re.search(r'"inferred"\s*:\s*(true|false)', slice_text)
+                ev = {
+                    "truck_id": tid,
+                    "truck_alias": alias_m2.group(1) if alias_m2 else "",
+                    "status": status_m2.group(1) if status_m2 else None,
+                    "site_id": site_id_m2.group(1) if site_id_m2 else None,
+                    "site_alias": site_alias_m2.group(1) if site_alias_m2 else None,
+                    "confidence": float(conf_m2.group(1)) if conf_m2 else overall_conf,
+                    "inferred": inferred_m2.group(1) == "true" if inferred_m2 else False,
+                }
+                if ev.get("status"):
+                    flat_events.append(ev)
+            if flat_events:
+                return {
+                    "msg_type": "STATUS_UPDATE",
+                    "events": flat_events,
+                    "tally": None,
+                    "query": None,
+                    "notes": "recovered from flat-JSON LLM output",
+                    "overall_confidence": overall_conf,
+                    "shift_id": None,
+                    "commit_recommendation": commit_rec,
+                }
+        return None
+
+    arr_start = events_m.end()
+    events: list = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(text[arr_start:], arr_start):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start is not None:
+                fragment = text[start:i + 1]
+                try:
+                    ev = json.loads(fragment)
+                except json.JSONDecodeError:
+                    start = None
+                    continue
+                # Drop hallucinated entries: string "null" truck_id, or totally empty events
+                tid = ev.get("truck_id")
+                if tid == "null" or (tid is None and not ev.get("truck_alias") and not ev.get("status")):
+                    start = None
+                    continue
+                if ev.get("status"):  # at minimum must have a status
+                    events.append(ev)
+                start = None
+        elif ch == ']' and depth == 0:
+            break  # end of events array
+
+    # TALLY_UPDATE: events array is always empty — extract tally field instead
+    if msg_type == "TALLY_UPDATE":
+        tally_data: Any = None
+        # Try to extract the tally value (dict or list)
+        tally_m = re.search(r'"tally"\s*:\s*(\{[^}]*\}|\[[^\]]*\])', text)
+        if tally_m:
+            try:
+                tally_data = json.loads(tally_m.group(1))
+            except json.JSONDecodeError:
+                pass
+        return {
+            "msg_type": "TALLY_UPDATE",
+            "events": [],
+            "tally": tally_data,
+            "query": None,
+            "notes": "recovered from partial LLM output",
+            "overall_confidence": overall_conf,
+            "shift_id": None,
+            "commit_recommendation": "COMMIT",
+        }
+
+    if not events:
+        return None
+
+    return {
+        "msg_type": msg_type,
+        "events": events,
+        "tally": None,
+        "query": None,
+        "notes": "recovered from partial LLM output",
+        "overall_confidence": overall_conf,
+        "shift_id": None,
+        "commit_recommendation": commit_rec,
+    }
+
+
 def parse_llm_output(raw_text: str) -> Dict[str, Any]:
     """
     Parse the raw LLM output string into a dict.
-    Handles markdown fences, <think> blocks, and embedded JSON.
-    Returns an error dict on failure.
+    Handles markdown fences, <think> blocks, embedded JSON, and partial output.
+    Returns an error dict only when all recovery attempts fail.
     """
     if not raw_text:
         return {"msg_type": "ERROR", "events": [], "error": "No output from model", "raw_llm_output": ""}
 
     cleaned = strip_markdown_fences(raw_text)
+
+    _MSG_TYPE_ALIASES = {
+        "truck": "STATUS_UPDATE", "truck_update": "STATUS_UPDATE",
+        "status": "STATUS_UPDATE", "status_update": "STATUS_UPDATE",
+        "tally": "TALLY_UPDATE", "tally_update": "TALLY_UPDATE",
+        "correction": "CORRECTION", "noise": "NOISE", "query": "QUERY",
+    }
+
+    def _normalize(d: dict) -> dict:
+        mt = d.get("msg_type", "")
+        canonical = _MSG_TYPE_ALIASES.get(mt.lower(), mt)
+        if canonical != mt:
+            d = {**d, "msg_type": canonical}
+        # Normalize commit key: "commit" → "commit_recommendation"
+        if "commit" in d and "commit_recommendation" not in d:
+            d = {**d, "commit_recommendation": d["commit"]}
+        return d
+
+    def _is_valid_result(d: dict) -> bool:
+        """Return True only if d looks like a proper pipeline result (has events list or is NOISE/TALLY)."""
+        mt = d.get("msg_type", "")
+        if mt in ("NOISE", "QUERY"):
+            return True
+        if mt == "TALLY_UPDATE":
+            return True
+        return isinstance(d.get("events"), list)
+
+    # Attempt 1: clean parse
     try:
-        return json.loads(cleaned)
+        parsed = _normalize(json.loads(cleaned))
+        if _is_valid_result(parsed):
+            return parsed
+        # Valid JSON but flat structure (no events array) — fall through to recovery
+        _flat_candidate = cleaned
     except json.JSONDecodeError:
-        # Fallback: try to find the first complete {...} JSON object in the text.
-        # Handles cases where the model wraps the JSON in prose.
-        match = re.search(r"\{[\s\S]*\}", cleaned)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                pass
-        return {
-            "msg_type": "ERROR",
-            "events": [],
-            "error": f"JSON parse failed — could not extract JSON from model output",
-            "raw_llm_output": raw_text,
-        }
+        _flat_candidate = None
+
+    # Attempt 2: find the first complete {...} JSON object (handles prose wrapper)
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    if match:
+        try:
+            parsed2 = _normalize(json.loads(match.group(0)))
+            if _is_valid_result(parsed2):
+                return parsed2
+            _flat_candidate = _flat_candidate or match.group(0)
+        except json.JSONDecodeError:
+            pass
+
+    # Attempt 3: event-by-event / flat-JSON recovery
+    candidate = (match.group(0) if match else None) or _flat_candidate or cleaned
+    recovered = _extract_partial_events(candidate)
+    if recovered is not None:
+        import sys
+        print("[Level3] parse_llm_output: recovered partial events from corrupted output", file=sys.stderr)
+        return recovered
+
+    return {
+        "msg_type": "ERROR",
+        "events": [],
+        "error": "JSON parse failed — could not extract JSON from model output",
+        "raw_llm_output": raw_text,
+    }
 
 
 # ---------------------------------------------------------------------------

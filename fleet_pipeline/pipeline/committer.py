@@ -23,6 +23,9 @@ from fleet_pipeline.pipeline.validator import validate_level3_output
 # Statuses that logically require a site
 SITE_REQUIRED_STATUSES = {"ENTER", "LS", "LO", "LEFT", "US", "UO"}
 
+# All valid truck event statuses — anything outside this set is an LLM hallucination
+VALID_STATUSES = {"ENTER", "LS", "LO", "LEFT", "US", "UO", "UNKNOWN"}
+
 # Short confirmations that carry no useful correction context
 _NOISE_PHRASES = {
     "yes", "yes ok", "ok", "okay", "ок", "haan", "ha", "ji", "theek hai",
@@ -46,12 +49,14 @@ class Committer:
         shift_detector=None,
         wa_message_id: Optional[str] = None,
         group_jid: Optional[str] = None,
+        sender_id: Optional[str] = None,
     ):
         self.db_path = db_path
         self.simulation_run_id = simulation_run_id
         self.shift_detector = shift_detector
         self.wa_message_id = wa_message_id    # original WA msg ID, stored on HITL questions
         self.group_jid = group_jid            # WA group, stored on HITL questions
+        self.sender_id = sender_id            # WA sender phone, used for site inference
         if simulation_run_id:
             # Ensure the run record exists so FK constraints don't fire
             with db.db_conn(db_path) as conn:
@@ -141,6 +146,32 @@ class Committer:
     # Handlers
     # ------------------------------------------------------------------
 
+    def _infer_site_from_sender_shift(
+        self, conn, sender_id: str, shift_id: Optional[str]
+    ) -> Optional[Tuple[str, str]]:
+        """
+        Look up the most recent committed/flagged event from the same sender
+        in the same shift (not a previous shift). Returns (site_id, site_alias) or None.
+        Used to infer location for a new truck with no known site.
+        """
+        if not sender_id or not shift_id:
+            return None
+        row = conn.execute(
+            """SELECT e.site_id, e.site_alias
+               FROM events e
+               JOIN raw_messages rm ON e.msg_id = rm.msg_id
+               WHERE rm.sender_id = ?
+                 AND e.shift_id = ?
+                 AND e.site_id IS NOT NULL
+                 AND e.commit_status IN ('COMMITTED', 'FLAGGED')
+               ORDER BY e.timestamp_effective DESC, e.rowid DESC
+               LIMIT 1""",
+            (sender_id, shift_id),
+        ).fetchone()
+        if row and row[0]:
+            return (row[0], row[1] or "")
+        return None
+
     def _needs_inferred_enter(self, conn, truck_id: str, site_id: str) -> bool:
         """
         Return True if truck_id has no ENTER event at site_id that is more recent
@@ -182,13 +213,50 @@ class Committer:
         _valid_sites = {
             r[0] for r in conn.execute("SELECT site_id FROM sites").fetchall()
         }
+        # Build alias→canonical maps so LLM alias leakage (e.g. "a" instead of "TA")
+        # is silently corrected rather than triggering a false UNRECOGNIZED_TRUCK.
+        _truck_alias_map: dict = {}
+        for row in conn.execute("SELECT truck_id, aliases FROM trucks").fetchall():
+            for alias in json.loads(row[1] or "[]"):
+                _truck_alias_map[alias.lower()] = row[0]
+        _site_alias_map: dict = {}
+        for row in conn.execute("SELECT site_id, aliases FROM sites").fetchall():
+            for alias in json.loads(row[1] or "[]"):
+                _site_alias_map[alias.lower()] = row[0]
         for ev in events:
+            # Normalise LLM quirks before any validation:
+            # 1. String "null" → JSON null for id fields
+            for _k in ("truck_id", "site_id"):
+                if ev.get(_k) in ("null", "None", ""):
+                    ev[_k] = None
+            # 2. "timestamp" → "timestamp_effective" (model sometimes uses wrong key)
+            if "timestamp_effective" not in ev and "timestamp" in ev:
+                ev["timestamp_effective"] = ev["timestamp"]
+            # 3. site_id missing but site_alias known → look up via alias map
+            if not ev.get("site_id") and ev.get("site_alias"):
+                _looked_up = _site_alias_map.get((ev["site_alias"] or "").lower())
+                if _looked_up:
+                    ev["site_id"] = _looked_up
+            # 4. truck_id missing but truck_alias known → look up via alias map
+            if not ev.get("truck_id") and ev.get("truck_alias"):
+                _looked_up = _truck_alias_map.get((ev["truck_alias"] or "").lower())
+                if _looked_up:
+                    ev["truck_id"] = _looked_up
+
             if ev.get("truck_id") and ev["truck_id"] not in _valid_trucks:
-                ev["_orig_truck_id"] = ev["truck_id"]
-                ev["truck_id"] = None
+                resolved = _truck_alias_map.get(ev["truck_id"].lower())
+                if resolved:
+                    ev["truck_id"] = resolved
+                else:
+                    ev["_orig_truck_id"] = ev["truck_id"]
+                    ev["truck_id"] = None
             if ev.get("site_id") and ev["site_id"] not in _valid_sites:
-                ev["_orig_site_id"] = ev["site_id"]
-                ev["site_id"] = None
+                resolved = _site_alias_map.get(ev["site_id"].lower())
+                if resolved:
+                    ev["site_id"] = resolved
+                else:
+                    ev["_orig_site_id"] = ev["site_id"]
+                    ev["site_id"] = None
 
         expanded = []
         enters_in_batch: set = set()
@@ -227,6 +295,35 @@ class Committer:
         events.sort(key=lambda e: _STATUS_ORDER.get(e.get("status", ""), 99))
 
         for ev in events:
+            # Drop events with hallucinated / non-existent status values
+            if ev.get("status") not in VALID_STATUSES:
+                import warnings
+                warnings.warn(
+                    f"[Committer] Dropping event with invalid status {ev.get('status')!r} "
+                    f"for truck {ev.get('truck_id')!r} — likely LLM hallucination"
+                )
+                continue
+
+            # Site inference: if site_id is unknown, try same sender's last event in this shift
+            if (ev.get("site_id") is None
+                    and ev.get("status", "") in SITE_REQUIRED_STATUSES
+                    and self.sender_id):
+                ev_shift_for_infer = ev.get("shift_id") or resolved_shift_id
+                inferred_site = self._infer_site_from_sender_shift(
+                    conn, self.sender_id, ev_shift_for_infer
+                )
+                if inferred_site:
+                    ev["site_id"] = inferred_site[0]
+                    ev["site_alias"] = inferred_site[1]
+                    ev["inferred"] = True
+                    # Cap confidence to FLAGGED range so it always gets reviewed
+                    ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.72)
+                    note = (f"site inferred from sender history in current shift "
+                            f"({inferred_site[1] or inferred_site[0]})")
+                    ev["reasoning"] = (
+                        f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
+                    )
+
             truck_id = ev.get("truck_id")
             site_id = ev.get("site_id")
             truck_alias = ev.get("truck_alias", "")
@@ -389,6 +486,11 @@ class Committer:
         return "COMMITTED", questions
 
     def _handle_tally(self, conn, level3_result, msg_id, summary):
+        """
+        Store tally for audit/reconciliation only.
+        Tallies are human cross-checks and must NOT alter fleet state (no events written,
+        no committed counter incremented). They are stored with status=RECEIVED.
+        """
         tally_data = level3_result.get("tally") or {}
         tally_id = str(uuid4())
         db.insert_tally(conn, {
@@ -396,10 +498,10 @@ class Committer:
             "msg_id": msg_id,
             "timestamp_iso": level3_result.get("raw_message", {}).get("timestamp_iso"),
             "tally_data": tally_data,
-            "commit_status": "COMMITTED",
+            "commit_status": "RECEIVED",
             "simulation_run_id": self.simulation_run_id,
         })
-        summary["committed"] += 1
+        summary["tally_received"] = summary.get("tally_received", 0) + 1
 
     def _handle_correction(self, conn, level3_result, msg_id, raw_text, summary):
         """

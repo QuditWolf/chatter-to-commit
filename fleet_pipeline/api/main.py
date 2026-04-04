@@ -63,12 +63,45 @@ def _setup_file_logging() -> None:
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """Configure file logging and run DB migrations on startup."""
+    """Configure file logging, run DB migrations, and start background tasks on startup."""
     _setup_file_logging()
     from fleet_pipeline.db.migrate import run_migrations
     from fleet_pipeline.config import DB_PATH as _DB_PATH
     run_migrations(_DB_PATH)
+
+    async def _auto_end_shift_loop():
+        """End the active shift if no messages have arrived in AUTO_END_GAP seconds."""
+        import sqlite3 as _sq3
+        from datetime import datetime, timezone
+        from fleet_pipeline.pipeline.shift_detector import ShiftDetector, AUTO_END_GAP
+        while True:
+            await asyncio.sleep(300)  # check every 5 minutes
+            try:
+                conn = _sq3.connect(_DB_PATH)
+                conn.row_factory = _sq3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                sd = ShiftDetector(conn)
+                if sd._active and sd._last_ts:
+                    gap = (datetime.now(timezone.utc) - sd._last_ts).total_seconds()
+                    if gap >= AUTO_END_GAP:
+                        shift_id_log = sd._active.get("shift_id", "")
+                        sd._end(datetime.now(timezone.utc))
+                        conn.commit()
+                        log.info(
+                            "Auto-ended shift %s after %.0fs inactivity",
+                            shift_id_log, gap,
+                        )
+                        await ws_manager.broadcast(
+                            "shift_changed", {"reason": "auto_end_inactivity"}
+                        )
+                conn.close()
+            except Exception as _exc:
+                log.warning("Auto-end shift check failed: %s", _exc)
+
+    task = asyncio.create_task(_auto_end_shift_loop())
     yield
+    task.cancel()
 
 
 app = FastAPI(

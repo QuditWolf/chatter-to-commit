@@ -30,6 +30,7 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
+.env.copy
 # Keep the example
 !.env.example
 !fleet_pipeline/wa_listener/.env.example
