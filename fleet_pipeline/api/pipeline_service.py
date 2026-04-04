@@ -18,7 +18,7 @@ from uuid import uuid4
 
 log = logging.getLogger(__name__)
 
-from fleet_pipeline.config import DB_PATH, LLM_MOCK
+from fleet_pipeline.config import DB_PATH, LLM_MOCK, MODEL_NAME
 from fleet_pipeline.audit import audit
 from fleet_pipeline.db import database as db
 from fleet_pipeline.pipeline.level1 import parse_timestamp
