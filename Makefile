@@ -1,4 +1,4 @@
-.PHONY: up down build logs shell-api shell-wa qr restart-wa
+.PHONY: up down build logs shell-api shell-wa qr restart-wa find-groups reset-wa-session
 
 # Start everything (build if needed)
 up:
@@ -32,7 +32,11 @@ shell-wa:
 restart-wa:
 	docker compose restart wa
 
-# Wipe WA session and re-authenticate
+# Find and list groups the bot is part of (shows JIDs)
+find-groups:
+	docker compose run --rm wa node index.js --find-groups
+
+# Reset WA session and re-authenticate
 reset-wa-session:
 	docker compose stop wa
 	docker volume rm 02_truck_fleet_wa_session 2>/dev/null || true
