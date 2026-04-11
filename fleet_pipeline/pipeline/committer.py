@@ -686,13 +686,21 @@ class Committer:
             questions.append(("UNKNOWN_SITE", {}))
             return "HELD", questions
 
-        # Rule: overall_confidence < HOLD threshold → HOLD + LOW_CONFIDENCE
-        if overall_confidence < thresholds["HOLD"]:
+        # Use ev_confidence for threshold checks — it reflects the actual event-level
+        # confidence including post-LLM corrections like site inference from sender history.
+        # If ev_confidence was set explicitly (e.g. to 0.72 from sender inference),
+        # use that; otherwise fall back to overall_confidence.
+        effective_confidence = (
+            ev_confidence if ev_confidence > 0 else overall_confidence
+        )
+
+        # Rule: effective_confidence < HOLD threshold → HOLD + LOW_CONFIDENCE
+        if effective_confidence < thresholds["HOLD"]:
             questions.append(("LOW_CONFIDENCE", {}))
             return "HELD", questions
 
         # Rule: confidence in COMMIT_FLAG range
-        if overall_confidence < thresholds["AUTO_COMMIT"]:
+        if effective_confidence < thresholds["AUTO_COMMIT"]:
             # commit_rec says FLAG
             if commit_rec == "COMMIT_FLAG":
                 return "FLAGGED", questions
