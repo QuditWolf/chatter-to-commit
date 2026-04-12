@@ -1,4 +1,4 @@
-.PHONY: up down build logs shell-api shell-wa qr restart-wa find-groups reset-wa-session
+.PHONY: up down build logs logs-tail logs-history shell-api shell-wa qr restart-wa find-groups reset-wa-session
 
 # Start everything (build if needed)
 up:
@@ -12,9 +12,18 @@ down:
 build:
 	docker compose build
 
-# Follow all logs
+# Follow all logs (docker container stdout/stderr)
 logs:
 	docker compose logs -f
+
+# Live tail of all log files combined (api.log + wa.log), prefixed with filename
+logs-tail:
+	tail -f logs/*.log
+
+# Historical view: merge all log files sorted by timestamp, pipe to less
+# sort -m = merge-sort (files must be internally sorted, which log files always are)
+logs-history:
+	sort -m logs/*.log | less
 
 # Show WA QR code (needed on first run or after session reset)
 qr:
