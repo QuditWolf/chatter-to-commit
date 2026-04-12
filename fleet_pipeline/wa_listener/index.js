@@ -202,45 +202,65 @@ async function findGroups() {
     version,
     auth: state,
     logger: pino({ level: "silent" }),
-    printQRInTerminal: true,
+    printQRInTerminal: false,
   });
+
+  sock.ev.on("creds.update", saveCreds);
 
   return new Promise((resolve) => {
     sock.ev.on("connection.update", async ({ connection, qr }) => {
       if (qr) {
-        console.log("\nScan QR to authenticate...\n");
+        console.log("\nScan QR to authenticate:\n");
+        qrcode.generate(qr, { small: true });
       }
       if (connection === "open") {
         console.log("✓ Connected! Fetching groups...\n");
-        
+
         try {
-          const groups = await sock.groupFetchAllParticipating();
-          const groupList = Object.values(groups).sort((a, b) => 
-            (b.subject || "").localeCompare(a.subject || "")
+          // groupFetchAllParticipating can hang — race against a 10s timeout
+          const groups = await Promise.race([
+            sock.groupFetchAllParticipating(),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("Timed out fetching groups (10s)")), 10000)
+            ),
+          ]);
+
+          const groupList = Object.values(groups).sort((a, b) =>
+            (a.subject || "").localeCompare(b.subject || "")
           );
 
-          console.log("Your groups:\n");
-          groupList.forEach((g, i) => {
-            const members = g.participants?.length || 0;
-            console.log(`  ${i + 1}. ${g.subject || "Unnamed group"}`);
-            console.log(`     JID: ${g.id}`);
-            console.log(`     Members: ${members}\n`);
-          });
+          if (groupList.length === 0) {
+            console.log("No groups found (account may not be in any groups).");
+          } else {
+            console.log("Your groups:\n");
+            groupList.forEach((g, i) => {
+              const members = g.participants?.length || 0;
+              console.log(`  ${i + 1}. ${g.subject || "Unnamed group"}`);
+              console.log(`     JID: ${g.id}`);
+              console.log(`     Members: ${members}\n`);
+            });
+          }
 
-          console.log("\nTo set a group as the target, add to your .env file:");
-          console.log(`WA_GROUP_JID=${groupList[0]?.id || "<group-jid>"}\n`);
+          console.log("Add the relevant JIDs to your .env:");
+          console.log(`  WA_GROUP_JID=<fleet group JID>         # read-only, truck events`);
+          console.log(`  WA_CONTROL_GROUP_JID=<control JID>     # bot replies, shift signals\n`);
         } catch (err) {
           console.error("Error fetching groups:", err.message);
+          console.log("\nTip: if this keeps timing out, try sending any message to");
+          console.log("the target group — its JID will appear in the listener logs.\n");
         }
 
-        await sock.logout();
-        await sock.end();
+        // Close connection without logout so the session is preserved for next run
+        try { sock.end(); } catch (_) {}
         resolve();
       }
       if (connection === "close") {
         resolve();
       }
     });
+  }).finally(() => {
+    // Ensure the process exits even if something keeps the event loop alive
+    setTimeout(() => process.exit(0), 500);
   });
 }
 

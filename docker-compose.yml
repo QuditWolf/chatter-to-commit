@@ -18,6 +18,8 @@ services:
       FLEET_LLM_TEMPERATURE:   ${FLEET_LLM_TEMPERATURE:-0.1}
       FLEET_LLM_MOCK:          ${FLEET_LLM_MOCK:-false}
       FLEET_AUTH_PASSWORD:     ${FLEET_AUTH_PASSWORD:-}
+      WA_GROUP_JID:            ${WA_GROUP_JID:-}
+      WA_CONTROL_GROUP_JID:    ${WA_CONTROL_GROUP_JID:-}
       WA_LISTENER_URL:         http://wa:3001
     networks:
       - fleet_net
@@ -37,12 +39,13 @@ services:
       - wa_session:/session
       - ./logs:/logs
     environment:
-      FLEET_API_URL:   http://api:8000
-      WA_GROUP_JID:    ${WA_GROUP_JID}
-      WA_HEALTH_PORT:  "3001"
-      WA_SESSION_DIR:  /session
-      FLEET_LOGS_DIR:  /logs
-      LOG_LEVEL:       ${LOG_LEVEL:-info}
+      FLEET_API_URL:        http://api:8000
+      WA_GROUP_JID:         ${WA_GROUP_JID:-}
+      WA_CONTROL_GROUP_JID: ${WA_CONTROL_GROUP_JID:-}
+      WA_HEALTH_PORT:       "3001"
+      WA_SESSION_DIR:       /session
+      FLEET_LOGS_DIR:       /logs
+      LOG_LEVEL:            ${LOG_LEVEL:-info}
     networks:
       - fleet_net
     depends_on:
