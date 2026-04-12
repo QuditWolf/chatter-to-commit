@@ -26,6 +26,7 @@ Operator API helpers (module-level, no singleton state needed):
    operator_end(db_path)     → end the current shift now
    operator_resume(db_path)  → reopen the most recently ended shift
 """
+import json
 import sqlite3
 import warnings
 from datetime import datetime, timezone
@@ -92,7 +93,7 @@ class ShiftDetector:
         # 1. WA signal override
         signal = detect_shift_signal(raw_text)
         if signal == "start":
-            self._start_new(ts, method="wa_signal")
+            self._start_new(ts, method="wa_signal", raw_text=raw_text)
             self._last_ts = ts
             return self._active_id()
         if signal == "end":
@@ -106,7 +107,7 @@ class ShiftDetector:
 
         # 3. No shift at all → start one
         elif not self._active:
-            self._start_new(ts, method="auto_start")
+            self._start_new(ts, method="auto_start", raw_text=raw_text)
 
         self._last_ts = ts
         return self._active_id()
@@ -155,7 +156,7 @@ class ShiftDetector:
         n = self._day_count(ts) + 1
         return f"{ts.strftime('%Y-%m-%d')}_{n:02d}"
 
-    def _start_new(self, ts: datetime, method: str):
+    def _start_new(self, ts: datetime, method: str, raw_text: str = ""):
         # Close current if open
         if self._active:
             self._end(ts)
@@ -167,12 +168,17 @@ class ShiftDetector:
         # Recount after potential _end() above
         day_num = self._day_count(ts) + 1
 
+        # Extract default site from shift start message (e.g. "shift start KN4")
+        default_site_id = _extract_site_from_text(self.conn, raw_text) if raw_text else None
+
         try:
             self.conn.execute(
                 """INSERT INTO shifts
-                   (shift_id, shift_number, shift_name, started_at, detection_method, simulation_run_id)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (shift_id, day_num, shift_name, ts.isoformat(), method, self.simulation_run_id),
+                   (shift_id, shift_number, shift_name, started_at, detection_method,
+                    simulation_run_id, default_site_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (shift_id, day_num, shift_name, ts.isoformat(), method,
+                 self.simulation_run_id, default_site_id),
             )
             self._active = {
                 "shift_id": shift_id,
@@ -180,6 +186,7 @@ class ShiftDetector:
                 "shift_name": shift_name,
                 "started_at": ts.isoformat(),
                 "ended_at": None,
+                "default_site_id": default_site_id,
             }
         except Exception as e:
             warnings.warn(f"[ShiftDetector] Failed to create shift: {e}")
@@ -264,6 +271,35 @@ def operator_resume(db_path: str) -> Optional[dict]:
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
+
+
+def _extract_site_from_text(conn: sqlite3.Connection, text: str) -> Optional[str]:
+    """
+    Scan text for a word that matches a known site alias or site_id.
+    Returns the canonical site_id, or None if no match.
+    Used to extract the default site from shift-start messages like "shift start KN4".
+    """
+    if not text:
+        return None
+    try:
+        rows = conn.execute("SELECT site_id, aliases FROM sites WHERE is_active=1").fetchall()
+    except Exception:
+        return None
+
+    words = re.findall(r"[A-Za-z0-9]{2,8}", text)
+    for word in words:
+        wl = word.lower()
+        for row in rows:
+            if wl == row[0].lower():
+                return row[0]
+            try:
+                aliases = json.loads(row[1] or "[]")
+            except Exception:
+                aliases = []
+            if wl in [a.lower() for a in aliases]:
+                return row[0]
+    return None
+
 
 def _parse_iso(ts: str) -> Optional[datetime]:
     if not ts:

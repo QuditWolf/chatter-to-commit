@@ -32,7 +32,8 @@ const qrcode     = require("qrcode-terminal");
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
-const GROUP_JID    = process.env.WA_GROUP_JID    || "";
+const GROUP_JID         = process.env.WA_GROUP_JID         || "";
+const CONTROL_GROUP_JID = process.env.WA_CONTROL_GROUP_JID || "";
 const SESSION_DIR  = process.env.WA_SESSION_DIR  || path.join(__dirname, "session");
 const LOG_LEVEL    = process.env.LOG_LEVEL       || "info";
 const API_URL      = process.env.FLEET_API_URL   || "http://localhost:8000";
@@ -253,7 +254,8 @@ async function startListener() {
   const { version } = await fetchLatestBaileysVersion();
   console.log(`[Fleet WA Listener] Baileys version: ${version.join(".")}`);
   console.log(`[Fleet WA Listener] API: ${API_URL}`);
-  console.log(`[Fleet WA Listener] Target group JID: ${GROUP_JID || "(not set — all groups)"}`);
+  console.log(`[Fleet WA Listener] Fleet group JID (read-only): ${GROUP_JID || "(not set)"}`);
+  console.log(`[Fleet WA Listener] Control group JID (bot replies): ${CONTROL_GROUP_JID || "(not set — same as fleet)"}`);;
 
   let retryCount = 0;
   let isFirstConnection = true;
@@ -326,8 +328,11 @@ async function startListener() {
 
         for (const msg of messages) {
           const jid = msg.key.remoteJid || "";
-          if (GROUP_JID && jid !== GROUP_JID) continue;
           if (!jid.endsWith("@g.us")) continue;
+          // Accept messages from fleet group and/or control group.
+          // If neither is configured, accept all groups.
+          const knownGroups = [GROUP_JID, CONTROL_GROUP_JID].filter(Boolean);
+          if (knownGroups.length > 0 && !knownGroups.includes(jid)) continue;
 
           // Skip messages sent by our own bot account
           if (msg.key.fromMe) continue;
@@ -345,14 +350,23 @@ async function startListener() {
           const received_at   = new Date(
             msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
           ).toISOString();
-          const message_type  = detectMessageType(text);
+          // Determine which group this message came from
+          const source_group = (CONTROL_GROUP_JID && jid === CONTROL_GROUP_JID)
+            ? "control"
+            : "fleet";
+
+          // For the fleet group: only fleet_event messages (no shift signals detected here)
+          // For the control group: shift signals, HITL answers, summary requests
+          const message_type = (source_group === "fleet")
+            ? "fleet_event"
+            : detectMessageType(text);
 
           // Detect if this message is a reply to a previous message (e.g. a bot HITL question)
           const quoted_wa_message_id =
             msg.message?.extendedTextMessage?.contextInfo?.stanzaId || null;
 
           const logExtra = quoted_wa_message_id ? ` [reply to ${quoted_wa_message_id.slice(0, 8)}…]` : "";
-          console.log(`[Fleet WA Listener] [${message_type}]${logExtra} ${sender_phone}: ${text.slice(0, 80)}`);
+          console.log(`[Fleet WA Listener] [${source_group}][${message_type}]${logExtra} ${sender_phone}: ${text.slice(0, 80)}`);
 
           // POST directly to Python pipeline
           const result = await postToAPI("/api/ingest/wa-message", {
@@ -363,6 +377,7 @@ async function startListener() {
             raw_text:              text,
             received_at,
             message_type,
+            source_group,          // "fleet" | "control"
             quoted_wa_message_id,  // null when not a reply
           });
 

@@ -478,6 +478,16 @@ def get_active_shift(conn: sqlite3.Connection) -> Optional[Dict]:
     return dict(row) if row else None
 
 
+def get_shift_default_site(conn: sqlite3.Connection, shift_id: str) -> Optional[str]:
+    """Return the default site_id announced when the shift started, or None."""
+    if not shift_id:
+        return None
+    row = conn.execute(
+        "SELECT default_site_id FROM shifts WHERE shift_id=?", (shift_id,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
 def get_all_shifts(conn: sqlite3.Connection) -> List[Dict]:
     rows = conn.execute("SELECT * FROM shifts ORDER BY started_at DESC").fetchall()
     return [dict(r) for r in rows]

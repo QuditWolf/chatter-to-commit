@@ -54,3 +54,6 @@ API_PORT = int(os.environ.get("FLEET_API_PORT", 8000))
 
 # WhatsApp
 WA_GROUP_JID = os.environ.get("WA_GROUP_JID", "")
+# Control group — HITL questions, shift signals, periodic summaries go here.
+# If empty, falls back to single-group mode (WA_GROUP_JID used for everything).
+WA_CONTROL_GROUP_JID = os.environ.get("WA_CONTROL_GROUP_JID", "")

@@ -1,15 +1,24 @@
 """
 Committer — sits between LLM output and the database.
 
-Applies commit rules from prompt.md:
-  COMMIT     → events table with commit_status=COMMITTED
-  COMMIT_FLAG→ events table with commit_status=FLAGGED + HITL question
-  HOLD       → events table with commit_status=HELD + HITL question
+Applies commit rules:
+  COMMIT     → events table with commit_status=COMMITTED  (confidence >= 0.85, all known)
+  COMMIT_FLAG→ events table with commit_status=FLAGGED + optional HITL question
+  HOLD       → NOT USED. Every event is committed as COMMITTED or FLAGGED.
   CORRECTION → find previous event(s), update them, set corrects_event_id
   DELETED    → mark referenced events DELETED + HITL question
-  confidence < 0.6 → always HITL regardless of commit_recommendation
-  truck_id=null → always HOLD + UNKNOWN_TRUCK HITL
-  site_id=null AND status requires site → COMMIT_FLAG + UNKNOWN_SITE HITL
+  confidence < 0.6 → FLAGGED + LOW_CONFIDENCE HITL (not blocked)
+  truck_id=null → FLAGGED + UNKNOWN_TRUCK HITL (committed, human reviews via HITL)
+  site_id=null AND status requires site → FLAGGED + UNKNOWN_SITE HITL (after all inference)
+
+Site inference order (when LLM site_id is null):
+  1. Sender's most recent event in the same shift (capped at 0.72 confidence)
+  2. Shift default site announced at shift start (capped at 0.88 confidence)
+  3. If still null → FLAGGED + UNKNOWN_SITE HITL
+
+Duplicate detection (stored as NOISE, excluded from fleet state):
+  - LO/UO within 20 min of previous LO/UO for same truck+site → duplicate
+  - ENTER within 20 min of LS/US for same truck+site → ordering error
 """
 
 import json
@@ -197,6 +206,79 @@ class Committer:
     # ------------------------------------------------------------------
     # Handlers
     # ------------------------------------------------------------------
+
+    # Minimum time between two LO/UO events for the same truck at the same site.
+    # A loading cycle takes at least 20 minutes, so a second LO within this window
+    # is almost certainly a duplicate transmission.
+    MIN_CYCLE_SECONDS = 20 * 60  # 20 minutes
+
+    def _check_duplicate(
+        self,
+        conn,
+        truck_id: str,
+        site_id: Optional[str],
+        status: str,
+        timestamp_effective: str,
+    ) -> Optional[str]:
+        """
+        Return a duplicate/ordering-error reason string if this event should be
+        skipped, or None if it is valid.
+
+        Rules:
+        - LO or UO within MIN_CYCLE_SECONDS of a previous LO/UO for the same
+          truck+site → duplicate (a full cycle takes >= 20 min).
+        - ENTER within MIN_CYCLE_SECONDS after an LS/US for the same truck+site
+          → ordering error (truck is mid-load, not starting a new cycle).
+        """
+        # Only check when truck and site are both known
+        if not truck_id or not site_id or not timestamp_effective:
+            return None
+
+        from fleet_pipeline.pipeline.shift_detector import _parse_iso
+
+        ts = _parse_iso(timestamp_effective)
+        if ts is None:
+            return None
+
+        if status in ("LO", "UO"):
+            row = conn.execute(
+                """SELECT timestamp_effective FROM events
+                   WHERE truck_id=? AND site_id=? AND status=?
+                     AND commit_status IN ('COMMITTED','FLAGGED')
+                   ORDER BY timestamp_effective DESC LIMIT 1""",
+                (truck_id, site_id, status),
+            ).fetchone()
+            if row and row[0]:
+                prev_ts = _parse_iso(row[0])
+                if prev_ts and (ts - prev_ts).total_seconds() < self.MIN_CYCLE_SECONDS:
+                    mins = int((ts - prev_ts).total_seconds() / 60)
+                    return (
+                        f"duplicate {status}: previous {status} for {truck_id} "
+                        f"at {site_id} was only {mins}min ago (min cycle = "
+                        f"{self.MIN_CYCLE_SECONDS // 60}min)"
+                    )
+
+        elif status == "ENTER":
+            # ENTER after LS/US within min cycle window = ordering error
+            row = conn.execute(
+                """SELECT status, timestamp_effective FROM events
+                   WHERE truck_id=? AND site_id=? AND status IN ('LS','US')
+                     AND commit_status IN ('COMMITTED','FLAGGED')
+                   ORDER BY timestamp_effective DESC LIMIT 1""",
+                (truck_id, site_id),
+            ).fetchone()
+            if row and row[1]:
+                prev_ts = _parse_iso(row[1])
+                if prev_ts and (ts - prev_ts).total_seconds() < self.MIN_CYCLE_SECONDS:
+                    mins = int((ts - prev_ts).total_seconds() / 60)
+                    return (
+                        f"ordering error: {truck_id} already has open {row[0]} "
+                        f"at {site_id} from {mins}min ago — ENTER within "
+                        f"{self.MIN_CYCLE_SECONDS // 60}min suggests duplicate, "
+                        f"not a new cycle"
+                    )
+
+        return None
 
     def _infer_site_from_sender_shift(
         self, conn, sender_id: str, shift_id: Optional[str]
@@ -457,6 +539,42 @@ class Committer:
                 )
                 continue
 
+            # Duplicate / ordering-error check (skip fleet-state change, record as NOISE)
+            dup_reason = self._check_duplicate(
+                conn,
+                ev.get("truck_id"),
+                ev.get("site_id"),
+                ev.get("status", ""),
+                ev.get("timestamp_effective", ""),
+            )
+            if dup_reason:
+                import warnings as _w
+                _w.warn(f"[Committer] Duplicate/ordering skip: {dup_reason}")
+                if msg_id:
+                    db.insert_event(
+                        conn,
+                        {
+                            "event_id": str(uuid4()),
+                            "msg_id": msg_id,
+                            "truck_id": ev.get("truck_id"),
+                            "truck_alias": ev.get("truck_alias", ""),
+                            "status": ev.get("status", ""),
+                            "site_id": ev.get("site_id"),
+                            "site_alias": ev.get("site_alias", ""),
+                            "timestamp_effective": ev.get("timestamp_effective", ""),
+                            "inferred": False,
+                            "confidence": ev.get("confidence", overall_confidence),
+                            "reasoning": dup_reason,
+                            "commit_status": "NOISE",
+                            "processing_id": processing_id,
+                            "simulation_run_id": self.simulation_run_id,
+                            "shift_id": ev.get("shift_id") or resolved_shift_id,
+                            "commit_path": "grey",
+                            "wa_message_id": self.wa_message_id,
+                        },
+                    )
+                continue
+
             # Site inference: if site_id is unknown, try same sender's last event in this shift
             if (
                 ev.get("site_id") is None
@@ -482,6 +600,23 @@ class Committer:
                     ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip(
                         "; "
                     )
+
+            # Site inference fallback: use shift's default site (announced at shift start)
+            if ev.get("site_id") is None and ev.get("status", "") in SITE_REQUIRED_STATUSES:
+                ev_shift_for_default = ev.get("shift_id") or resolved_shift_id
+                if ev_shift_for_default:
+                    default_site = db.get_shift_default_site(conn, ev_shift_for_default)
+                    if default_site:
+                        ev["site_id"] = default_site
+                        ev["site_alias"] = ev.get("site_alias") or default_site
+                        ev["inferred"] = True
+                        ev["confidence"] = min(
+                            ev.get("confidence", overall_confidence), 0.88
+                        )
+                        note = f"site from shift default ({default_site})"
+                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip(
+                            "; "
+                        )
 
             truck_id = ev.get("truck_id")
             site_id = ev.get("site_id")
@@ -531,12 +666,13 @@ class Committer:
                     event_commit_status = "FLAGGED"
 
             # Derive commit_path label for UI
+            # "red" (HELD) is no longer produced — every event is COMMITTED or FLAGGED.
             commit_path = (
                 "green"
                 if event_commit_status == "COMMITTED"
                 else "amber"
                 if event_commit_status == "FLAGGED"
-                else "red"
+                else "red"  # fallback, should not occur
             )
 
             db.insert_event(
@@ -670,44 +806,41 @@ class Committer:
     ) -> Tuple[str, List[Tuple[str, dict]]]:
         """
         Apply commit rules. Returns (commit_status, list_of_hitl_questions_to_create).
+
+        Policy: EVERY event is committed — either COMMITTED or FLAGGED.
+        HELD is never used. HITL questions are still created for human review
+        but they are non-blocking (operator can correct via HITL answer later).
         """
         questions = []
         thresholds = CONFIDENCE_THRESHOLDS
 
-        # Rule: unknown truck → always HOLD
+        # Unknown truck → FLAGGED + HITL for review (not blocked)
         if truck_id is None:
             questions.append(("UNKNOWN_TRUCK", {}))
-            return "HELD", questions
+            return "FLAGGED", questions
 
-        # Rule: site_id=null AND status requires site → HOLD + UNKNOWN_SITE only
-        # Return immediately — low confidence is a consequence of the unknown site,
-        # not an independent issue. Don't pile on a second HITL question.
+        # Unknown site (status requires one) → FLAGGED + HITL for review
+        # Single question — low confidence is a consequence of the unknown site.
         if site_id is None and status in SITE_REQUIRED_STATUSES:
             questions.append(("UNKNOWN_SITE", {}))
-            return "HELD", questions
+            return "FLAGGED", questions
 
         # Use ev_confidence for threshold checks — it reflects the actual event-level
         # confidence including post-LLM corrections like site inference from sender history.
-        # If ev_confidence was set explicitly (e.g. to 0.72 from sender inference),
-        # use that; otherwise fall back to overall_confidence.
         effective_confidence = (
             ev_confidence if ev_confidence > 0 else overall_confidence
         )
 
-        # Rule: effective_confidence < HOLD threshold → HOLD + LOW_CONFIDENCE
+        # Low confidence → FLAGGED + LOW_CONFIDENCE HITL for review
         if effective_confidence < thresholds["HOLD"]:
             questions.append(("LOW_CONFIDENCE", {}))
-            return "HELD", questions
+            return "FLAGGED", questions
 
-        # Rule: confidence in COMMIT_FLAG range
+        # Mid confidence range
         if effective_confidence < thresholds["AUTO_COMMIT"]:
-            # commit_rec says FLAG
-            if commit_rec == "COMMIT_FLAG":
-                return "FLAGGED", questions
             if commit_rec == "HOLD":
+                # LLM recommends hold — flag for review, add LOW_CONFIDENCE HITL
                 questions.append(("LOW_CONFIDENCE", {}))
-                return "HELD", questions
-            # COMMIT but mid-confidence → FLAG
             return "FLAGGED", questions
 
         # High confidence (>= AUTO_COMMIT)

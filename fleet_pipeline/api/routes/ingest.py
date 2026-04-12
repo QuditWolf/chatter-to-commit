@@ -33,6 +33,7 @@ class WAMessageRequest(BaseModel):
     raw_text: str
     received_at: str  # ISO string from Node
     message_type: str = "fleet_event"
+    source_group: str = "fleet"  # "fleet" (read-only) | "control" (HITL + shift signals)
     quoted_wa_message_id: Optional[str] = (
         None  # set when operator replies to a bot message
     )
@@ -128,11 +129,14 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
     Called by the Node.js WA listener for every group message.
     Returns 202 immediately. Processing happens in background.
 
-    If quoted_wa_message_id matches an open HITL question's bot_wa_message_id,
-    the message is routed as a HITL answer (skipping the normal pipeline).
+    Fleet group (source_group="fleet"): READ-ONLY — messages run through the
+    fleet event pipeline. Bot messages are NEVER sent to this group.
+
+    Control group (source_group="control"): HITL answers, shift signals with
+    site announcements, and summary requests. All bot replies go here.
     """
     import sqlite3
-    from fleet_pipeline.config import DB_PATH
+    from fleet_pipeline.config import DB_PATH, WA_CONTROL_GROUP_JID
     from fleet_pipeline.api.main import ws_manager
     from fleet_pipeline.db import database as db
 
@@ -155,26 +159,45 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
         except Exception:
             pass
 
-    # ── HITL reply routing ────────────────────────────────────────────────────
-    if req.quoted_wa_message_id:
-        with db.db_conn(DB_PATH) as conn:
-            hitl_q = db.get_open_question_by_bot_wa_id(conn, req.quoted_wa_message_id)
-        if hitl_q:
-            # Operator replied to a bot HITL message — route as answer
-            background_tasks.add_task(
-                _handle_wa_hitl_answer,
-                question=hitl_q,
-                answer_text=req.raw_text.strip(),
-                answered_by=req.sender_phone,
-                group_jid=req.group_jid,
-            )
-            return {
-                "queued": True,
-                "routed_as": "hitl_answer",
-                "question_id": hitl_q["question_id"],
-            }
+    # Determine if this message is from the control group
+    is_control = (
+        req.source_group == "control"
+        or (WA_CONTROL_GROUP_JID and req.group_jid == WA_CONTROL_GROUP_JID)
+    )
 
-    # ── Normal pipeline ───────────────────────────────────────────────────────
+    # ── Control group: HITL answers, shift signals, summary requests ──────────
+    if is_control:
+        # HITL reply routing — operator replied to a bot clarification
+        if req.quoted_wa_message_id:
+            with db.db_conn(DB_PATH) as conn:
+                hitl_q = db.get_open_question_by_bot_wa_id(conn, req.quoted_wa_message_id)
+            if hitl_q:
+                background_tasks.add_task(
+                    _handle_wa_hitl_answer,
+                    question=hitl_q,
+                    answer_text=req.raw_text.strip(),
+                    answered_by=req.sender_phone,
+                    group_jid=req.group_jid,
+                )
+                return {
+                    "queued": True,
+                    "routed_as": "hitl_answer",
+                    "question_id": hitl_q["question_id"],
+                }
+
+        # Shift signals + summary requests
+        background_tasks.add_task(
+            _handle_control_message,
+            raw_text=req.raw_text,
+            timestamp_iso=req.received_at,
+            group_jid=req.group_jid,
+        )
+        return {"queued": True, "wa_message_id": req.wa_message_id, "source": "control"}
+
+    # ── Fleet group: pipeline only — NEVER send messages back ─────────────────
+    # All bot output (HITL questions, summaries) goes to the control group.
+    bot_group_jid = WA_CONTROL_GROUP_JID or req.group_jid
+
     await ws_manager.broadcast(
         "message_received",
         {
@@ -195,11 +218,80 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
         source="whatsapp",
         msg_id=req.wa_message_id,
         wa_message_id=req.wa_message_id,
-        group_jid=req.group_jid,
+        group_jid=bot_group_jid,
         quoted_wa_message_id=req.quoted_wa_message_id,
     )
 
     return {"queued": True, "wa_message_id": req.wa_message_id}
+
+
+async def _handle_control_message(
+    raw_text: str,
+    timestamp_iso: str,
+    group_jid: str,
+) -> None:
+    """
+    Handle a message from the control group (not a HITL reply).
+    Handles: shift start/end with site extraction, and summary requests.
+    """
+    import re
+    import sqlite3
+    from datetime import datetime, timezone
+    from fleet_pipeline.config import DB_PATH
+    from fleet_pipeline.pipeline.shift_detector import detect_shift_signal, ShiftDetector
+    from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group
+    from fleet_pipeline.api.main import ws_manager
+
+    text = raw_text.strip()
+
+    # ── Shift signal (start/end) ──────────────────────────────────────────────
+    signal = detect_shift_signal(text)
+    if signal in ("start", "end"):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+
+            ts = None
+            try:
+                ts = datetime.fromisoformat(timestamp_iso)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except Exception:
+                ts = datetime.now(timezone.utc)
+
+            sd = ShiftDetector(conn)
+            if signal == "start":
+                sd._start_new(ts, method="wa_signal", raw_text=text)
+            else:
+                sd._end(ts)
+
+            conn.commit()
+            conn.close()
+
+            await ws_manager.broadcast(
+                "shift_changed",
+                {"reason": f"control_{signal}_signal", "raw_text": text},
+            )
+        except Exception as exc:
+            log.error("Control shift signal handling failed: %s", exc)
+        return
+
+    # ── Summary request ───────────────────────────────────────────────────────
+    _SUMMARY_RE = [
+        re.compile(r"\b(summary|sumary|summery)\b", re.I),
+        re.compile(r"\b(total|count)\b", re.I),
+        re.compile(r"\bsend\s+(report|summary)\b", re.I),
+        re.compile(r"\b(report|give|send)\s+(me\s+)?(the\s+)?(total|count|summary)\b", re.I),
+    ]
+    for pat in _SUMMARY_RE:
+        if pat.search(text):
+            try:
+                send_summary_to_group(group_jid, DB_PATH)
+            except Exception as exc:
+                log.warning("On-demand summary failed: %s", exc)
+            return
 
 
 async def _handle_wa_hitl_answer(

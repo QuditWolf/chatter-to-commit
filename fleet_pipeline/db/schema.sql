@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS shifts (
     ended_at         TIMESTAMP,
     detection_method TEXT DEFAULT 'time_based',  -- time_based | wa_signal | manual
     shift_name       TEXT,                       -- added via migration
+    default_site_id  TEXT,                       -- site announced with shift start (via control group)
     notes            TEXT,
     simulation_run_id TEXT REFERENCES simulation_runs(run_id),
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP

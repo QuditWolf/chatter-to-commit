@@ -93,16 +93,17 @@ async def lifespan(application: FastAPI):
                     gap = (datetime.now(timezone.utc) - sd._last_ts).total_seconds()
                     if gap >= AUTO_END_GAP:
                         shift_id_log = sd._active.get("shift_id", "")
-                        # Post summary before ending the shift
-                        from fleet_pipeline.config import WA_GROUP_JID
+                        # Post summary before ending the shift (to control group)
+                        from fleet_pipeline.config import WA_CONTROL_GROUP_JID, WA_GROUP_JID
 
-                        if WA_GROUP_JID:
+                        summary_jid = WA_CONTROL_GROUP_JID or WA_GROUP_JID
+                        if summary_jid:
                             try:
                                 from fleet_pipeline.pipeline.wa_notifier import (
                                     send_summary_to_group,
                                 )
 
-                                send_summary_to_group(WA_GROUP_JID, _DB_PATH)
+                                send_summary_to_group(summary_jid, _DB_PATH)
                             except Exception as _exc:
                                 log.warning("Auto-end summary post failed: %s", _exc)
                         sd._end(datetime.now(timezone.utc))
@@ -119,9 +120,27 @@ async def lifespan(application: FastAPI):
             except Exception as _exc:
                 log.warning("Auto-end shift check failed: %s", _exc)
 
+    async def _periodic_summary_loop():
+        """Post a shift summary to the control group every 15 minutes."""
+        from fleet_pipeline.config import WA_CONTROL_GROUP_JID, WA_GROUP_JID, DB_PATH as _DB_PATH2
+        from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group as _send_summary
+
+        while True:
+            await asyncio.sleep(900)  # 15 minutes
+            summary_jid = WA_CONTROL_GROUP_JID or WA_GROUP_JID
+            if not summary_jid:
+                continue
+            try:
+                _send_summary(summary_jid, _DB_PATH2)
+                log.info("Periodic summary posted to %s", summary_jid)
+            except Exception as _exc:
+                log.warning("Periodic summary post failed: %s", _exc)
+
     task = asyncio.create_task(_auto_end_shift_loop())
+    summary_task = asyncio.create_task(_periodic_summary_loop())
     yield
     task.cancel()
+    summary_task.cancel()
 
 
 app = FastAPI(

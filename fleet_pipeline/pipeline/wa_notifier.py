@@ -20,6 +20,15 @@ log = logging.getLogger(__name__)
 WA_LISTENER_URL = os.environ.get("WA_LISTENER_URL", "http://localhost:3001")
 
 
+def _resolve_group_jid(group_jid: Optional[str]) -> Optional[str]:
+    """
+    Always route bot messages to the control group if configured.
+    Falls back to the provided group_jid for backward compatibility.
+    """
+    control = os.environ.get("WA_CONTROL_GROUP_JID", "")
+    return control if control else group_jid
+
+
 def _format_hitl_message(q_type: str, context: dict, raw_text: str) -> str:
     """Return a concise, actionable WA reply text for each HITL type.
 
@@ -157,9 +166,13 @@ def notify_hitl_questions(
     message. Stores the returned bot_wa_message_id back in hitl_queue so that the
     operator's reply can be matched to the question.
 
+    Always sends to WA_CONTROL_GROUP_JID if configured, ignoring group_jid to ensure
+    the fleet group (read-only) never receives bot messages.
+
     questions: list of dicts with keys: question_id, question_type, context,
                raw_text, original_wa_message_id
     """
+    group_jid = _resolve_group_jid(group_jid)
     if not group_jid:
         return
 
@@ -199,9 +212,11 @@ def notify_hitl_questions(
 
 def send_summary_to_group(group_jid: str, db_path: str) -> None:
     """
-    Generate the current shift summary and post it to the WA group.
+    Generate the current shift summary and post it to the control group.
     Uses the same format as the frontend's copyable summary (emoji-free).
+    Always sends to WA_CONTROL_GROUP_JID if configured.
     """
+    group_jid = _resolve_group_jid(group_jid)
     if not group_jid:
         return
 
