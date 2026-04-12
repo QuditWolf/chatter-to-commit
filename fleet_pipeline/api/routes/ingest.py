@@ -13,6 +13,7 @@ import logging
 from typing import Optional
 
 import pytz
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from fleet_pipeline.utils import now_ist
