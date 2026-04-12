@@ -383,16 +383,3 @@ def _parse_iso(ts: str) -> Optional[datetime]:
         return dt
     except Exception:
         return None
-    try:
-        dt = datetime.fromisoformat(ts)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        # Always convert to IST for consistent comparison
-        import pytz
-
-        IST = pytz.timezone("Asia/Kolkata")
-        if dt.tzinfo != IST:
-            dt = dt.astimezone(IST)
-        return dt
-    except Exception:
-        return None
