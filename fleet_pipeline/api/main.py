@@ -80,8 +80,9 @@ async def lifespan(application: FastAPI):
     async def _auto_end_shift_loop():
         """End the active shift if no messages have arrived in AUTO_END_GAP seconds."""
         import sqlite3 as _sq3
-        from datetime import datetime, timezone
+        from datetime import datetime
         from fleet_pipeline.pipeline.shift_detector import ShiftDetector, AUTO_END_GAP
+        from fleet_pipeline.utils import now_ist
 
         while True:
             await asyncio.sleep(300)  # check every 5 minutes
@@ -92,11 +93,14 @@ async def lifespan(application: FastAPI):
                 conn.execute("PRAGMA foreign_keys=ON")
                 sd = ShiftDetector(conn)
                 if sd._active and sd._last_ts:
-                    gap = (datetime.now(timezone.utc) - sd._last_ts).total_seconds()
+                    gap = (now_ist() - sd._last_ts).total_seconds()
                     if gap >= AUTO_END_GAP:
                         shift_id_log = sd._active.get("shift_id", "")
                         # Post summary before ending the shift (to control group)
-                        from fleet_pipeline.config import WA_CONTROL_GROUP_JID, WA_GROUP_JID
+                        from fleet_pipeline.config import (
+                            WA_CONTROL_GROUP_JID,
+                            WA_GROUP_JID,
+                        )
 
                         summary_jid = WA_CONTROL_GROUP_JID or WA_GROUP_JID
                         if summary_jid:
@@ -108,7 +112,7 @@ async def lifespan(application: FastAPI):
                                 send_summary_to_group(summary_jid, _DB_PATH)
                             except Exception as _exc:
                                 log.warning("Auto-end summary post failed: %s", _exc)
-                        sd._end(datetime.now(timezone.utc))
+                        sd._end(now_ist())
                         conn.commit()
                         log.info(
                             "Auto-ended shift %s after %.0fs inactivity",
@@ -124,8 +128,14 @@ async def lifespan(application: FastAPI):
 
     async def _periodic_summary_loop():
         """Post a shift summary to the control group every 15 minutes."""
-        from fleet_pipeline.config import WA_CONTROL_GROUP_JID, WA_GROUP_JID, DB_PATH as _DB_PATH2
-        from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group as _send_summary
+        from fleet_pipeline.config import (
+            WA_CONTROL_GROUP_JID,
+            WA_GROUP_JID,
+            DB_PATH as _DB_PATH2,
+        )
+        from fleet_pipeline.pipeline.wa_notifier import (
+            send_summary_to_group as _send_summary,
+        )
 
         while True:
             await asyncio.sleep(900)  # 15 minutes

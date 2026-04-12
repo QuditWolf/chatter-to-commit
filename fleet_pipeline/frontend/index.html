@@ -167,7 +167,7 @@ td { padding: 7px 8px; color: var(--color-text-primary); border-bottom: 0.5px so
 tr:last-child td { border-bottom: none; }
 
 /* ── Status pills ────────────────────────────────────────────────── */
-.pill { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+.pill { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 500; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .pill.loading    { background: #EAF3DE; color: #27500A; }
 .pill.unloading  { background: #E6F1FB; color: #0C447C; }
 .pill.transit    { background: #FAEEDA; color: #633806; }
@@ -324,6 +324,44 @@ tr:last-child td { border-bottom: none; }
 .status-sub { font-size: 11px; color: var(--color-text-secondary); margin-left: 6px; font-family: var(--font-mono); }
 .status-label { font-size: 12px; font-weight: 500; }
 .status-sep { color: var(--color-border-primary); margin: 0 4px; font-size: 11px; }
+
+/* ── Merge section ─────────────────────────────────────────────────── */
+.merge-controls { display: flex; flex-direction: column; gap: 8px; }
+.merge-row label { display: block; }
+
+/* ── Mobile responsiveness ──────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .topbar { padding: 0 12px; gap: 0; }
+  .logo { font-size: 14px; margin-right: 16px; }
+  .nav-tab { padding: 0 10px; font-size: 12px; }
+  .live { display: none; }
+  .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .section-row { grid-template-columns: 1fr; }
+  .section-row.three { grid-template-columns: 1fr; }
+  .main { padding: 12px; gap: 12px; }
+  .kpi { padding: 12px; }
+  .kpi-val { font-size: 22px; }
+  .card { padding: 12px; }
+  .site-panes { grid-template-columns: 1fr; }
+  .site-pane + .site-pane { border-left: none; border-top: 0.5px solid var(--color-border-tertiary); }
+  table { font-size: 11px; }
+  th { padding: 4px 4px 6px; }
+  td { padding: 5px 4px; }
+  .msg-row { grid-template-columns: 1fr; gap: 8px; }
+  .raw-msg { font-size: 10px; }
+  .slideout-panel { width: 100%; right: -100%; }
+  .filter-bar { flex-direction: column; }
+  .filter-bar input { width: 100%; }
+  .nl-wrap { flex-direction: column; }
+  #cl-search, #nl-input { min-width: unset; }
+  .hitl-actions { flex-direction: column; }
+  .hitl-actions input { width: 100%; }
+  .commits-table-scroll { overflow-x: auto; }
+  .card table { min-width: 600px; }
+  .merge-controls select { width: 100%; }
+  #commit-modal > div { width: 95vw; padding: 16px; }
+  #login-overlay > div { width: 90vw; }
+}
 </style>
 </head>
 <body>
@@ -386,7 +424,7 @@ tr:last-child td { border-bottom: none; }
       <div class="kpi-names" id="kpi-transit-names"><span class="dot gray"></span>–</div>
     </div>
     <div class="kpi">
-      <div class="kpi-label">Loaded &amp; left field today</div>
+      <div class="kpi-label">Loaded this shift</div>
       <div class="kpi-val" id="kpi-loaded-count">–</div>
       <div class="kpi-sub" id="kpi-loaded-sub"></div>
     </div>
@@ -723,6 +761,33 @@ tr:last-child td { border-bottom: none; }
     <div style="margin-top:10px;font-size:12px;color:var(--color-text-secondary)">Shift boundaries auto-detected from time logic. WA keyword overrides when present.</div>
   </div>
 
+  <!-- Merge trolleys -->
+  <div class="card">
+    <div class="card-title">Merge trolleys</div>
+    <div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:12px">
+      Merges source into destination — all events are reassigned, aliases are copied, and source trolley is deactivated.
+    </div>
+    <div class="merge-controls">
+      <div class="merge-row">
+        <label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">Source trolley (will be merged into destination)</label>
+        <select id="merge-src" style="width:100%;padding:7px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:13px">
+          <option value="">Select source…</option>
+        </select>
+      </div>
+      <div style="text-align:center;font-size:18px;color:var(--color-text-secondary);padding:4px 0">↓</div>
+      <div class="merge-row">
+        <label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:4px">Destination trolley (keeps all data)</label>
+        <select id="merge-dst" style="width:100%;padding:7px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:13px">
+          <option value="">Select destination…</option>
+        </select>
+      </div>
+    </div>
+    <div id="merge-result" style="margin-top:10px;font-size:12px;display:none"></div>
+    <div style="margin-top:10px">
+      <button class="btn-primary" style="padding:8px 20px" onclick="doMerge()">Merge trolleys</button>
+    </div>
+  </div>
+
 </div>
 
 </div><!-- .app -->
@@ -794,6 +859,7 @@ const S = {
   sites: [],
   pendingMessages: {},  // wa_message_id → {raw_text, sender, timestamp_iso}
   llmWasOffline: false, // track LLM offline→online transition for reprocess prompt
+  hitlAnswers: {},      // question_id → typed answer (persists across refreshes)
 };
 
 // ── Auth helpers ──────────────────────────────────────────────────────────
@@ -852,15 +918,15 @@ const fmtTime = iso => {
     const time = d.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', hour12:false, ..._IST});
     const nowDate = new Date().toLocaleDateString('en-CA', _IST);
     const msgDate = d.toLocaleDateString('en-CA', _IST);
-    if(nowDate === msgDate) return time;
+    if(nowDate === msgDate) return time + ' IST';
     const dateStr = d.toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric', ..._IST});
-    return `${dateStr} ${time}`;
+    return `${dateStr} ${time} IST`;
   } catch{ return iso.slice(0,16)||'–'; }
 };
 
 const fmtDate = iso => {
   if(!iso) return '–';
-  try { return new Date(iso).toLocaleDateString('en-IN', _IST); }
+  try { return new Date(iso).toLocaleDateString('en-IN', _IST) + ' IST'; }
   catch{ return iso.slice(0,10)||'–'; }
 };
 
@@ -1024,7 +1090,7 @@ async function refreshKPIs() {
     document.getElementById('kpi-unloading-names').innerHTML = `<span class="dot amber"></span>${k.in_unloading.trucks.join(', ') || '–'}`;
     document.getElementById('kpi-transit-count').textContent = k.in_transit.count;
     document.getElementById('kpi-transit-names').innerHTML = `<span class="dot gray"></span>${k.in_transit.trucks.join(', ') || '–'}`;
-    document.getElementById('kpi-loaded-count').textContent = k.loaded_today.count;
+    document.getElementById('kpi-loaded-count').textContent = k.loaded_shift.count;
 
     // Site analytics — fetched separately so KPI stays fast
     refreshSiteAnalytics();
@@ -1039,6 +1105,10 @@ async function refreshKPIs() {
       // Update shift control card
       const ctrlName = document.getElementById('shift-ctrl-name');
       if(ctrlName) ctrlName.textContent = `Active: ${shLabel}`;
+    } else {
+      document.getElementById('shift-name').textContent = 'No active shift';
+      document.getElementById('shift-msg-count').textContent = '–';
+      document.getElementById('live-label').textContent = 'No active shift';
     }
 
     refreshFleetTable();
@@ -1278,7 +1348,7 @@ async function refreshHITL() {
         <div style="font-family:var(--font-mono);font-size:12px;padding:6px 8px;background:var(--color-background-secondary);border-radius:4px;margin-bottom:8px">"${escHtml(rawMsg)}"</div>
         ${parsedSummary?`<div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:8px">Parsed as: ${escHtml(parsedSummary)}</div>`:''}
         <div class="hitl-actions">
-          <input type="text" id="ans-${q.question_id}" placeholder="${escAttr(hint)}"/>
+          <input type="text" id="ans-${q.question_id}" placeholder="${escAttr(hint)}" value="${escAttr(S.hitlAnswers[q.question_id]||'')}" oninput="S.hitlAnswers['${q.question_id}']=this.value"/>
           <button onclick="resolveHITL('${q.question_id}','answer')">Submit</button>
           <button onclick="resolveHITL('${q.question_id}','skip')">Skip</button>
         </div>
@@ -1915,7 +1985,47 @@ function switchTab(id, el) {
   if(id === 'operator')  { loadMessages(); refreshHITL(); }
   if(id === 'dashboard') { refreshKPIs(); refreshSiteAnalytics(); refreshShiftReport(); }
   if(id === 'commits')   { populateCommitFilters(); loadCommits(); }
-  if(id === 'admin')     { loadTruckRegistry(); loadSiteRegistry(); loadShiftConfig(); }
+  if(id === 'admin')     { loadTruckRegistry(); loadSiteRegistry(); loadShiftConfig(); loadMergeTrucks(); }
+}
+
+// ── Truck merge ───────────────────────────────────────────────────────────
+async function loadMergeTrucks() {
+  const srcSel = document.getElementById('merge-src');
+  const dstSel = document.getElementById('merge-dst');
+  if (!srcSel || !dstSel) return;
+  if (srcSel.options.length > 1) return; // already populated
+  (S.trucks || []).forEach(t => {
+    const label = t.display_name || t.truck_id;
+    srcSel.add(new Option(label, t.truck_id));
+    dstSel.add(new Option(label, t.truck_id));
+  });
+}
+
+async function doMerge() {
+  const srcId = document.getElementById('merge-src').value;
+  const dstId = document.getElementById('merge-dst').value;
+  const resEl = document.getElementById('merge-result');
+  if (!srcId || !dstId) { alert('Select both source and destination trolleys.'); return; }
+  if (srcId === dstId) { alert('Source and destination cannot be the same.'); return; }
+  if (!confirm(`Merge trolley "${srcId}" into "${dstId}"? Events will be reassigned and "${srcId}" will be deactivated.`)) return;
+  resEl.style.display = 'block';
+  resEl.textContent = 'Merging…';
+  resEl.style.color = 'var(--color-text-secondary)';
+  try {
+    const d = await API('/api/trucks/merge', {
+      method: 'POST',
+      body: JSON.stringify({ src_id: srcId, dst_id: dstId }),
+    });
+    resEl.style.color = '#27500A';
+    resEl.textContent = `✅ Merged "${d.src_id}" → "${d.dst_id}". ${d.events_reassigned} events reassigned.`;
+    document.getElementById('merge-src').value = '';
+    document.getElementById('merge-dst').value = '';
+    loadTruckRegistry();
+    loadRegistriesForMap();
+  } catch(e) {
+    resEl.style.color = 'var(--color-text-danger)';
+    resEl.textContent = `Error: ${e.message}`;
+  }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────

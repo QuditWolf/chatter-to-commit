@@ -8,6 +8,8 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
+from fleet_pipeline.utils import now_ist_iso
+
 from fleet_pipeline.config import DB_PATH
 
 
@@ -97,11 +99,14 @@ def auto_create_truck(conn: sqlite3.Connection, truck_alias: str) -> Optional[st
     Returns the new truck_id, or None if alias is empty/already exists.
     """
     import re as _re
+
     if not truck_alias or not truck_alias.strip():
         return None
 
     # Generate a stable truck_id from the alias
-    truck_id = _re.sub(r"[^A-Za-z0-9_]", "_", truck_alias.strip()).upper()[:20].strip("_")
+    truck_id = (
+        _re.sub(r"[^A-Za-z0-9_]", "_", truck_alias.strip()).upper()[:20].strip("_")
+    )
     if not truck_id:
         return None
 
@@ -119,7 +124,10 @@ def auto_create_truck(conn: sqlite3.Connection, truck_alias: str) -> Optional[st
             aliases = json.loads(row["aliases"] or "[]")
         except Exception:
             aliases = []
-        if truck_alias.lower() in [a.lower() for a in aliases] or truck_alias.lower() == row["truck_id"].lower():
+        if (
+            truck_alias.lower() in [a.lower() for a in aliases]
+            or truck_alias.lower() == row["truck_id"].lower()
+        ):
             # Already exists under a different ID — don't create duplicate
             return None
 
@@ -239,7 +247,10 @@ def update_event_status(
 
 
 def get_recent_events_for_truck(
-    conn: sqlite3.Connection, truck_id: str, limit: int = 5, shift_id: Optional[str] = None
+    conn: sqlite3.Connection,
+    truck_id: str,
+    limit: int = 5,
+    shift_id: Optional[str] = None,
 ) -> List[Dict]:
     if shift_id:
         rows = conn.execute(
@@ -285,7 +296,9 @@ def get_committed_events(
     return [dict(r) for r in rows]
 
 
-def get_fleet_state(conn: sqlite3.Connection, shift_id: Optional[str] = None) -> List[Dict]:
+def get_fleet_state(
+    conn: sqlite3.Connection, shift_id: Optional[str] = None
+) -> List[Dict]:
     """Latest committed/flagged event per truck, optionally scoped to a shift."""
     if shift_id:
         rows = conn.execute(
@@ -441,13 +454,11 @@ def answer_question(
     answer: str,
     answered_by: str = "human",
 ) -> None:
-    from datetime import datetime, timezone
-
     conn.execute(
         """UPDATE hitl_queue
            SET status='ANSWERED', answer=?, answered_by=?, answered_at=?
            WHERE question_id=?""",
-        (answer, answered_by, datetime.now(timezone.utc).isoformat(), question_id),
+        (answer, answered_by, now_ist_iso(), question_id),
     )
 
 
@@ -475,15 +486,13 @@ def insert_simulation_run(conn: sqlite3.Connection, run: Dict[str, Any]) -> None
 def update_simulation_run(
     conn: sqlite3.Connection, run_id: str, stats: Dict[str, Any]
 ) -> None:
-    from datetime import datetime, timezone
-
     conn.execute(
         """UPDATE simulation_runs SET
            finished_at=?, total_msgs=?, committed=?, flagged=?, held=?,
            errors=?, hitl_created=?
            WHERE run_id=?""",
         (
-            datetime.now(timezone.utc).isoformat(),
+            now_ist_iso(),
             stats.get("total_msgs", 0),
             stats.get("committed", 0),
             stats.get("flagged", 0),
@@ -601,12 +610,8 @@ def merge_trucks(conn: sqlite3.Connection, src_id: str, dst_id: str) -> dict:
     - Deactivate src truck
     Returns {"merged": True, "aliases_added": [...], "events_reassigned": N}
     """
-    src = conn.execute(
-        "SELECT * FROM trucks WHERE truck_id=?", (src_id,)
-    ).fetchone()
-    dst = conn.execute(
-        "SELECT * FROM trucks WHERE truck_id=?", (dst_id,)
-    ).fetchone()
+    src = conn.execute("SELECT * FROM trucks WHERE truck_id=?", (src_id,)).fetchone()
+    dst = conn.execute("SELECT * FROM trucks WHERE truck_id=?", (dst_id,)).fetchone()
     if not src or not dst:
         raise ValueError(f"Truck not found: src={src_id!r} dst={dst_id!r}")
 
@@ -635,9 +640,7 @@ def merge_trucks(conn: sqlite3.Connection, src_id: str, dst_id: str) -> dict:
     events_reassigned = result.rowcount
 
     # Deactivate src truck
-    conn.execute(
-        "UPDATE trucks SET is_active=0 WHERE truck_id=?", (src_id,)
-    )
+    conn.execute("UPDATE trucks SET is_active=0 WHERE truck_id=?", (src_id,))
 
     return {
         "merged": True,
@@ -672,8 +675,6 @@ def update_shift_config(
     expected_end: Optional[str],
     wa_keyword: Optional[str],
 ) -> None:
-    from datetime import datetime, timezone
-
     conn.execute(
         """UPDATE shift_config
            SET start_time=?, expected_end=?, wa_keyword=?, updated_at=?
@@ -682,7 +683,7 @@ def update_shift_config(
             start_time,
             expected_end,
             wa_keyword,
-            datetime.now(timezone.utc).isoformat(),
+            now_ist_iso(),
             shift_number,
         ),
     )
@@ -694,8 +695,6 @@ def update_shift_config(
 
 
 def insert_correction(conn: sqlite3.Connection, c: Dict[str, Any]) -> None:
-    from datetime import datetime, timezone
-
     conn.execute(
         """INSERT INTO corrections
            (correction_id, original_event_id, corrected_by, corrected_at,
@@ -705,7 +704,7 @@ def insert_correction(conn: sqlite3.Connection, c: Dict[str, Any]) -> None:
             c["correction_id"],
             c["original_event_id"],
             c["corrected_by"],
-            c.get("corrected_at", datetime.now(timezone.utc).isoformat()),
+            c.get("corrected_at", now_ist_iso()),
             c["field_changed"],
             c.get("original_value"),
             c.get("corrected_value"),
@@ -716,7 +715,7 @@ def insert_correction(conn: sqlite3.Connection, c: Dict[str, Any]) -> None:
     conn.execute(
         "UPDATE events SET corrected=TRUE, corrected_at=? WHERE event_id=?",
         (
-            c.get("corrected_at", datetime.now(timezone.utc).isoformat()),
+            c.get("corrected_at", now_ist_iso()),
             c["original_event_id"],
         ),
     )
@@ -846,9 +845,11 @@ def get_messages_page(
     }
 
 
-def get_fleet_kpis(conn: sqlite3.Connection, shift_id: Optional[str] = None) -> Dict[str, Any]:
+def get_fleet_kpis(
+    conn: sqlite3.Connection, shift_id: Optional[str] = None
+) -> Dict[str, Any]:
     """KPI summary: in loading, unloading, transit counts + loaded in current shift."""
-    fleet = get_fleet_state(conn)
+    fleet = get_fleet_state(conn, shift_id=shift_id)
     in_loading = [
         t
         for t in fleet
@@ -861,26 +862,16 @@ def get_fleet_kpis(conn: sqlite3.Connection, shift_id: Optional[str] = None) -> 
     ]
     in_transit = [t for t in fleet if t.get("status") == "LEFT"]
 
-    if shift_id:
-        loaded_rows = conn.execute(
+    loaded_rows = (
+        conn.execute(
             """SELECT DISTINCT truck_id FROM events
-               WHERE commit_status IN ('COMMITTED','FLAGGED') AND status='LO'
-                 AND shift_id=?""",
+           WHERE commit_status IN ('COMMITTED','FLAGGED') AND status='LO'
+             AND shift_id=?""",
             (shift_id,),
         ).fetchall()
-    else:
-        from datetime import datetime, timezone
-        today_start = (
-            datetime.now(timezone.utc)
-            .replace(hour=0, minute=0, second=0, microsecond=0)
-            .isoformat()
-        )
-        loaded_rows = conn.execute(
-            """SELECT DISTINCT truck_id FROM events
-               WHERE commit_status IN ('COMMITTED','FLAGGED') AND status='LO'
-                 AND timestamp_effective >= ?""",
-            (today_start,),
-        ).fetchall()
+        if shift_id
+        else []
+    )
     loaded_in_shift = [r[0] for r in loaded_rows]
 
     return {
@@ -896,7 +887,7 @@ def get_fleet_kpis(conn: sqlite3.Connection, shift_id: Optional[str] = None) -> 
             "count": len(in_transit),
             "trucks": [t.get("truck_id") for t in in_transit],
         },
-        "loaded_today": {
+        "loaded_shift": {
             "count": len(loaded_in_shift),
             "trucks": loaded_in_shift,
         },
@@ -912,38 +903,23 @@ def _is_loading_site(conn: sqlite3.Connection, site_id: Optional[str]) -> bool:
     return row and row[0] == "loading"
 
 
-def get_site_load_summary(conn: sqlite3.Connection, shift_id: Optional[str] = None) -> List[Dict]:
-    """Per-site count of trolleys that completed a load (LO) in the current shift (or today)."""
-    if shift_id:
-        rows = conn.execute(
-            """SELECT s.display_name as site_name, e.site_id,
-                      COUNT(DISTINCT e.truck_id) as count
-               FROM events e
-               JOIN sites s ON e.site_id = s.site_id
-               WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='LO'
-                 AND e.shift_id=?
-               GROUP BY e.site_id
-               ORDER BY count DESC""",
-            (shift_id,),
-        ).fetchall()
-    else:
-        from datetime import datetime, timezone
-        today_start = (
-            datetime.now(timezone.utc)
-            .replace(hour=0, minute=0, second=0, microsecond=0)
-            .isoformat()
-        )
-        rows = conn.execute(
-            """SELECT s.display_name as site_name, e.site_id,
-                      COUNT(DISTINCT e.truck_id) as count
-               FROM events e
-               JOIN sites s ON e.site_id = s.site_id
-               WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='LO'
-                 AND e.timestamp_effective >= ?
-               GROUP BY e.site_id
-               ORDER BY count DESC""",
-            (today_start,),
-        ).fetchall()
+def get_site_load_summary(
+    conn: sqlite3.Connection, shift_id: Optional[str] = None
+) -> List[Dict]:
+    """Per-site count of trolleys that completed a load (LO) in the current shift."""
+    if not shift_id:
+        return []
+    rows = conn.execute(
+        """SELECT s.display_name as site_name, e.site_id,
+                  COUNT(DISTINCT e.truck_id) as count
+           FROM events e
+           JOIN sites s ON e.site_id = s.site_id
+           WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='LO'
+             AND e.shift_id=?
+           GROUP BY e.site_id
+           ORDER BY count DESC""",
+        (shift_id,),
+    ).fetchall()
     return [dict(r) for r in rows]
 
 

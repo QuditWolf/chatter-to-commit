@@ -4,6 +4,7 @@ GET /analytics/summary    — KPIs, status breakdown, site activity, confidence 
 GET /analytics/timeline   — events per hour for the most recent simulation run
 GET /analytics/fleet-map  — current truck positions for map overlay
 """
+
 import json
 from collections import defaultdict
 from fastapi import APIRouter
@@ -18,9 +19,12 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 def analytics_summary():
     with db_conn(DB_PATH) as conn:
         # KPIs
-        totals = dict(conn.execute(
-            "SELECT commit_status, COUNT(*) as n FROM events GROUP BY commit_status"
-        ).fetchall() or [])
+        totals = dict(
+            conn.execute(
+                "SELECT commit_status, COUNT(*) as n FROM events GROUP BY commit_status"
+            ).fetchall()
+            or []
+        )
         total_events = sum(totals.values())
         committed = totals.get("COMMITTED", 0)
         flagged = totals.get("FLAGGED", 0)
@@ -110,7 +114,6 @@ def analytics_timeline():
 def analytics_historical():
     """All-time historical analytics: calendar counts, hourly patterns, per-truck/site stats."""
     with db_conn(DB_PATH) as conn:
-
         # Daily event counts
         daily = conn.execute("""
             SELECT substr(timestamp_effective,1,10) as d, COUNT(*) as n
@@ -182,32 +185,45 @@ def analytics_historical():
     total_cycles = sum(r[2] for r in truck_cycles)
     avg_cycle = (
         round(sum(r[2] * (r[3] or 0) for r in truck_cycles) / total_cycles, 1)
-        if total_cycles else 0
+        if total_cycles
+        else 0
     )
 
     return {
         "kpis": {
-            "active_days":  len(daily),
+            "active_days": len(daily),
             "total_events": sum(r[1] for r in daily),
             "total_cycles": total_cycles,
             "avg_cycle_min": avg_cycle,
         },
         "daily_counts": {r[0]: r[1] for r in daily},
-        "hourly_dow":   [{"dow": int(r[0]), "hr": r[1], "n": r[2]} for r in hourly_dow],
-        "monthly":      {r[0]: r[1] for r in monthly},
+        "hourly_dow": [{"dow": int(r[0]), "hr": r[1], "n": r[2]} for r in hourly_dow],
+        "monthly": {r[0]: r[1] for r in monthly},
         "truck_cycles": [
-            {"name": r[0], "id": r[1], "cycles": r[2],
-             "avg_min": r[3], "min_min": r[4], "max_min": r[5]}
+            {
+                "name": r[0],
+                "id": r[1],
+                "cycles": r[2],
+                "avg_min": r[3],
+                "min_min": r[4],
+                "max_min": r[5],
+            }
             for r in truck_cycles
         ],
         "site_stats": [
-            {"name": r[0], "type": r[1], "total_events": r[2],
-             "active_days": r[3], "load_starts": r[4], "unique_trucks": r[5]}
+            {
+                "name": r[0],
+                "type": r[1],
+                "total_events": r[2],
+                "active_days": r[3],
+                "load_starts": r[4],
+                "unique_trucks": r[5],
+            }
             for r in site_stats
         ],
         "message_stats": {
-            "total":   msg_stats[0] if msg_stats else 0,
-            "edited":  msg_stats[1] if msg_stats else 0,
+            "total": msg_stats[0] if msg_stats else 0,
+            "edited": msg_stats[1] if msg_stats else 0,
             "deleted": msg_stats[2] if msg_stats else 0,
         },
     }
@@ -216,21 +232,30 @@ def analytics_historical():
 @router.get("/site-state")
 def site_state():
     """
-    Per-site operational state + totals.
+    Per-site operational state + totals for the CURRENT SHIFT.
 
-    State: current position of each truck at each site (based on latest committed event):
+    State: current position of each truck at each site (based on latest committed event in current shift):
       - entered     : status=ENTER (arrived, not yet loading/unloading)
       - in_progress : status=LS or US (operation started, not over)
       - op_over     : status=LO or UO (over but not yet LEFT)
 
     Totals:
-      - total_lo    : all-time LO events committed at this site
-      - total_left  : all-time LEFT events committed at this site
+      - total_lo    : LO events committed at this site in current shift
+      - total_left  : LEFT events committed at this site in current shift
     """
     with db_conn(DB_PATH) as conn:
-        # Current fleet state (latest committed event per truck)
+        # Active shift
+        shift_row = conn.execute(
+            "SELECT shift_id FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        shift_id = shift_row["shift_id"] if shift_row else None
+
+        shift_filter = "AND e.shift_id = ?" if shift_id else ""
+        bind = [shift_id] if shift_id else []
+
+        # Current fleet state (latest committed event per truck in current shift)
         state_rows = conn.execute(
-            """SELECT e.truck_id, COALESCE(t.display_name, e.truck_alias, e.truck_id) as truck_name,
+            f"""SELECT e.truck_id, COALESCE(t.display_name, e.truck_alias, e.truck_id) as truck_name,
                       e.status, e.site_id, COALESCE(s.display_name, e.site_id) as site_name, s.site_type
                FROM events e
                LEFT JOIN trucks t ON e.truck_id = t.truck_id
@@ -238,36 +263,65 @@ def site_state():
                WHERE e.commit_status = 'COMMITTED'
                  AND e.truck_id IS NOT NULL
                  AND e.site_id  IS NOT NULL
+                 {shift_filter}
                  AND e.rowid IN (
                    SELECT MAX(rowid) FROM events
                    WHERE commit_status='COMMITTED' AND truck_id IS NOT NULL
+                     AND site_id IS NOT NULL
+                     {"AND shift_id = ?" if shift_id else ""}
                    GROUP BY truck_id
-                 )"""
+                 )""",
+            bind + bind,
         ).fetchall()
 
-        # All-time totals per site
+        # Totals per site in current shift
         totals_rows = conn.execute(
-            """SELECT site_id,
+            f"""SELECT site_id,
                       SUM(CASE WHEN status='LO'   THEN 1 ELSE 0 END) as total_lo,
                       SUM(CASE WHEN status='LEFT'  THEN 1 ELSE 0 END) as total_left,
                       SUM(CASE WHEN status='UO'   THEN 1 ELSE 0 END) as total_uo
                FROM events
                WHERE commit_status='COMMITTED' AND site_id IS NOT NULL
-               GROUP BY site_id"""
+                 AND truck_id IS NOT NULL
+                 {shift_filter.replace("e.", "")}
+               GROUP BY site_id""",
+            bind,
         ).fetchall()
 
-        # All sites (so we include sites with no current activity)
+        # Sites with events in current shift (only show sites relevant to this shift)
         all_sites = conn.execute(
-            "SELECT site_id, display_name, site_type FROM sites WHERE is_active=1"
+            f"""SELECT DISTINCT s.site_id, COALESCE(s.display_name, s.site_id) as display_name, s.site_type
+                FROM events e JOIN sites s ON e.site_id = s.site_id
+                WHERE e.commit_status='COMMITTED' AND e.truck_id IS NOT NULL
+                  {"AND e.shift_id = ?" if shift_id else ""}
+                UNION
+                SELECT s.site_id, COALESCE(s.display_name, s.site_id) as display_name, s.site_type
+                FROM sites s
+                WHERE s.is_active=1
+                  AND (s.site_type = 'loading' OR s.site_type = 'unloading')
+                ORDER BY display_name""",
+            bind,
         ).fetchall()
 
     # Build totals index
     totals_by_site = {}
     for r in totals_rows:
-        totals_by_site[r[0]] = {"total_lo": r[1] or 0, "total_left": r[2] or 0, "total_uo": r[3] or 0}
+        totals_by_site[r[0]] = {
+            "total_lo": r[1] or 0,
+            "total_left": r[2] or 0,
+            "total_uo": r[3] or 0,
+        }
 
     # Build state index: site_id → {entered, in_progress, op_over}
-    state_by_site = defaultdict(lambda: {"entered": [], "in_progress": [], "op_over": [], "site_name": "", "site_type": ""})
+    state_by_site = defaultdict(
+        lambda: {
+            "entered": [],
+            "in_progress": [],
+            "op_over": [],
+            "site_name": "",
+            "site_type": "",
+        }
+    )
     for r in state_rows:
         truck_id, truck_name, status, site_id, site_name, site_type = r
         entry = state_by_site[site_id]
@@ -288,36 +342,48 @@ def site_state():
     for site_id, state in state_by_site.items():
         seen.add(site_id)
         t = totals_by_site.get(site_id, {"total_lo": 0, "total_left": 0, "total_uo": 0})
-        result.append({
-            "site_id": site_id,
-            "site_name": state["site_name"] or site_id,
-            "site_type": state["site_type"],
-            "state": {
-                "entered": state["entered"],
-                "in_progress": state["in_progress"],
-                "op_over": state["op_over"],
-            },
-            "totals": t,
-        })
+        result.append(
+            {
+                "site_id": site_id,
+                "site_name": state["site_name"] or site_id,
+                "site_type": state["site_type"],
+                "state": {
+                    "entered": state["entered"],
+                    "in_progress": state["in_progress"],
+                    "op_over": state["op_over"],
+                },
+                "totals": t,
+            }
+        )
     # Then: sites from registry that had no current activity but have historical totals
     for r in all_sites:
         sid, sname, stype = r[0], r[1], r[2]
         if sid not in seen:
             t = totals_by_site.get(sid, {"total_lo": 0, "total_left": 0, "total_uo": 0})
             if t["total_lo"] > 0 or t["total_left"] > 0:
-                result.append({
-                    "site_id": sid,
-                    "site_name": sname or sid,
-                    "site_type": stype or "",
-                    "state": {"entered": [], "in_progress": [], "op_over": []},
-                    "totals": t,
-                })
+                result.append(
+                    {
+                        "site_id": sid,
+                        "site_name": sname or sid,
+                        "site_type": stype or "",
+                        "state": {"entered": [], "in_progress": [], "op_over": []},
+                        "totals": t,
+                    }
+                )
 
     # Sort: active sites first (have current state), then by name
-    result.sort(key=lambda x: (
-        0 if (x["state"]["entered"] or x["state"]["in_progress"] or x["state"]["op_over"]) else 1,
-        x["site_name"]
-    ))
+    result.sort(
+        key=lambda x: (
+            0
+            if (
+                x["state"]["entered"]
+                or x["state"]["in_progress"]
+                or x["state"]["op_over"]
+            )
+            else 1,
+            x["site_name"],
+        )
+    )
     return {"sites": result}
 
 
@@ -342,42 +408,70 @@ def shift_summary():
         shift_row = conn.execute(
             "SELECT shift_id, shift_number, started_at, shift_name FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
-        shift_id   = shift_row["shift_id"]   if shift_row else None
-        shift_name = (shift_row["shift_name"] or f"Shift {shift_row['shift_number']}") if shift_row else "All time"
+        shift_id = shift_row["shift_id"] if shift_row else None
+        shift_name = (
+            (shift_row["shift_name"] or f"Shift {shift_row['shift_number']}")
+            if shift_row
+            else None
+        )
 
-        # Bind param: if no shift, use all COMMITTED events; else filter by shift
-        shift_filter = "AND e.shift_id = ?" if shift_id else ""
-        bind = [shift_id] if shift_id else []
+        # If no active shift, return empty data
+        if not shift_id:
+            return {
+                "loaded_by_site": {},
+                "reached_by_site": {},
+                "unloaded_by_site": {},
+                "in_loading": [],
+                "in_unloading": [],
+                "truck_cycles": [],
+                "shift_name": None,
+                "shift_id": None,
+                "total_loaded": 0,
+                "text": "No active shift.",
+            }
+
+        shift_filter = "AND e.shift_id = ?"
+        bind = [shift_id]
 
         # LO count per loading site
-        lo_rows = conn.execute(f"""
+        lo_rows = conn.execute(
+            f"""
             SELECT e.site_id, COALESCE(s.display_name, e.site_id) as site_name, COUNT(*) as n
             FROM events e LEFT JOIN sites s ON e.site_id=s.site_id
             WHERE e.commit_status='COMMITTED' AND e.status='LO'
               AND s.site_type='loading' {shift_filter}
             GROUP BY e.site_id ORDER BY n DESC
-        """, bind).fetchall()
+        """,
+            bind,
+        ).fetchall()
 
         # ENTER count per unloading site
-        reach_rows = conn.execute(f"""
+        reach_rows = conn.execute(
+            f"""
             SELECT e.site_id, COALESCE(s.display_name, e.site_id) as site_name, COUNT(*) as n
             FROM events e LEFT JOIN sites s ON e.site_id=s.site_id
             WHERE e.commit_status='COMMITTED' AND e.status='ENTER'
               AND s.site_type='unloading' {shift_filter}
             GROUP BY e.site_id ORDER BY n DESC
-        """, bind).fetchall()
+        """,
+            bind,
+        ).fetchall()
 
         # UO count per unloading site
-        uo_rows = conn.execute(f"""
+        uo_rows = conn.execute(
+            f"""
             SELECT e.site_id, COALESCE(s.display_name, e.site_id) as site_name, COUNT(*) as n
             FROM events e LEFT JOIN sites s ON e.site_id=s.site_id
             WHERE e.commit_status='COMMITTED' AND e.status='UO'
               AND s.site_type='unloading' {shift_filter}
             GROUP BY e.site_id ORDER BY n DESC
-        """, bind).fetchall()
+        """,
+            bind,
+        ).fetchall()
 
         # Trucks currently in loading (latest committed event per truck = LS, site_type=loading)
-        in_loading_rows = conn.execute("""
+        in_loading_rows = conn.execute(
+            f"""
             SELECT COALESCE(t.display_name, e.truck_alias, e.truck_id) as label,
                    e.truck_alias, e.truck_id, COALESCE(s.display_name, e.site_id) as site_name
             FROM events e
@@ -385,15 +479,20 @@ def shift_summary():
             LEFT JOIN sites  s ON e.site_id=s.site_id
             WHERE e.commit_status='COMMITTED' AND e.status='LS'
               AND s.site_type='loading' AND e.truck_id IS NOT NULL
+              {shift_filter}
               AND e.rowid IN (
                 SELECT MAX(rowid) FROM events
                 WHERE commit_status='COMMITTED' AND truck_id IS NOT NULL
+                  {"AND shift_id = ?" if shift_id else ""}
                 GROUP BY truck_id
               )
-        """).fetchall()
+        """,
+            bind,
+        ).fetchall()
 
         # Trucks currently in unloading (latest event = US)
-        in_unloading_rows = conn.execute("""
+        in_unloading_rows = conn.execute(
+            f"""
             SELECT COALESCE(t.display_name, e.truck_alias, e.truck_id) as label,
                    e.truck_alias, e.truck_id, COALESCE(s.display_name, e.site_id) as site_name
             FROM events e
@@ -401,52 +500,75 @@ def shift_summary():
             LEFT JOIN sites  s ON e.site_id=s.site_id
             WHERE e.commit_status='COMMITTED' AND e.status='US'
               AND s.site_type='unloading' AND e.truck_id IS NOT NULL
+              {shift_filter}
               AND e.rowid IN (
                 SELECT MAX(rowid) FROM events
                 WHERE commit_status='COMMITTED' AND truck_id IS NOT NULL
+                  {"AND shift_id = ?" if shift_id else ""}
                 GROUP BY truck_id
               )
-        """).fetchall()
+        """,
+            bind,
+        ).fetchall()
 
         # Per-truck LO count (load cycles) this shift
-        truck_lo = conn.execute(f"""
+        truck_lo = conn.execute(
+            f"""
             SELECT e.truck_id,
                    COALESCE(e.truck_alias, e.truck_id) as alias,
                    COUNT(*) as loads
             FROM events e
             WHERE e.commit_status='COMMITTED' AND e.status='LO' {shift_filter}
             GROUP BY e.truck_id ORDER BY loads DESC, e.truck_id
-        """, bind).fetchall()
+        """,
+            bind,
+        ).fetchall()
 
         # Per-truck UO count
         truck_uo_map = {}
-        for r in conn.execute(f"""
+        for r in conn.execute(
+            f"""
             SELECT e.truck_id, COUNT(*) as unloads
             FROM events e
             WHERE e.commit_status='COMMITTED' AND e.status='UO' {shift_filter}
             GROUP BY e.truck_id
-        """, bind).fetchall():
+        """,
+            bind,
+        ).fetchall():
             truck_uo_map[r["truck_id"]] = r["unloads"]
 
     # Build structured data
-    loaded_by_site  = {r["site_id"]: {"name": r["site_name"], "count": r["n"]} for r in lo_rows}
-    reached_by_site = {r["site_id"]: {"name": r["site_name"], "count": r["n"]} for r in reach_rows}
-    unloaded_by_site= {r["site_id"]: {"name": r["site_name"], "count": r["n"]} for r in uo_rows}
+    loaded_by_site = {
+        r["site_id"]: {"name": r["site_name"], "count": r["n"]} for r in lo_rows
+    }
+    reached_by_site = {
+        r["site_id"]: {"name": r["site_name"], "count": r["n"]} for r in reach_rows
+    }
+    unloaded_by_site = {
+        r["site_id"]: {"name": r["site_name"], "count": r["n"]} for r in uo_rows
+    }
 
     truck_cycles = []
     for r in truck_lo:
         alias = r["alias"] or r["truck_id"]
         # Normalise alias: strip leading T for display (TA→A)
         import re
-        short = re.sub(r'^T([A-Z0-9]{1,2})$', r'\1', alias) if alias == alias.upper() else alias
-        truck_cycles.append({
-            "truck_id": r["truck_id"],
-            "alias": short,
-            "loads": r["loads"],
-            "unloads": truck_uo_map.get(r["truck_id"], 0),
-        })
 
-    in_loading_trucks   = [dict(r) for r in in_loading_rows]
+        short = (
+            re.sub(r"^T([A-Z0-9]{1,2})$", r"\1", alias)
+            if alias == alias.upper()
+            else alias
+        )
+        truck_cycles.append(
+            {
+                "truck_id": r["truck_id"],
+                "alias": short,
+                "loads": r["loads"],
+                "unloads": truck_uo_map.get(r["truck_id"], 0),
+            }
+        )
+
+    in_loading_trucks = [dict(r) for r in in_loading_rows]
     in_unloading_trucks = [dict(r) for r in in_unloading_rows]
 
     total_loaded = sum(d["count"] for d in loaded_by_site.values())
@@ -479,16 +601,27 @@ def shift_summary():
         short_aliases = []
         for a in aliases:
             import re
-            short_aliases.append(re.sub(r'^T([A-Z0-9]{1,2})$', r'\1', a) if a == a.upper() else a)
-        lines.append(f"Trolleys in Loading = {len(in_loading_trucks)}  ({', '.join(short_aliases)})")
+
+            short_aliases.append(
+                re.sub(r"^T([A-Z0-9]{1,2})$", r"\1", a) if a == a.upper() else a
+            )
+        lines.append(
+            f"Trolleys in Loading = {len(in_loading_trucks)}  ({', '.join(short_aliases)})"
+        )
     else:
         lines.append("Trolleys in Loading = 0")
 
     if in_unloading_trucks:
         aliases = [r["truck_alias"] or r["truck_id"] for r in in_unloading_trucks]
         import re
-        short_aliases = [re.sub(r'^T([A-Z0-9]{1,2})$', r'\1', a) if a == a.upper() else a for a in aliases]
-        lines.append(f"Trolleys in Unloading = {len(in_unloading_trucks)}  ({', '.join(short_aliases)})")
+
+        short_aliases = [
+            re.sub(r"^T([A-Z0-9]{1,2})$", r"\1", a) if a == a.upper() else a
+            for a in aliases
+        ]
+        lines.append(
+            f"Trolleys in Unloading = {len(in_unloading_trucks)}  ({', '.join(short_aliases)})"
+        )
 
     if truck_cycles:
         lines.append("")
@@ -499,16 +632,16 @@ def shift_summary():
     text = "\n".join(lines)
 
     return {
-        "shift_id":        shift_id,
-        "shift_name":      shift_name,
-        "total_loaded":    total_loaded,
-        "loaded_by_site":  loaded_by_site,
+        "shift_id": shift_id,
+        "shift_name": shift_name,
+        "total_loaded": total_loaded,
+        "loaded_by_site": loaded_by_site,
         "reached_by_site": reached_by_site,
-        "unloaded_by_site":unloaded_by_site,
-        "in_loading":      in_loading_trucks,
-        "in_unloading":    in_unloading_trucks,
-        "truck_cycles":    truck_cycles,
-        "text":            text,
+        "unloaded_by_site": unloaded_by_site,
+        "in_loading": in_loading_trucks,
+        "in_unloading": in_unloading_trucks,
+        "truck_cycles": truck_cycles,
+        "text": text,
     }
 
 
@@ -528,6 +661,22 @@ def fleet_map():
                    GROUP BY truck_id
                  )"""
         ).fetchall()
-    return {"trucks": [dict(zip(
-        ["truck_id","truck_alias","status","site_id","confidence","timestamp_effective","display_name"], r
-    )) for r in rows]}
+    return {
+        "trucks": [
+            dict(
+                zip(
+                    [
+                        "truck_id",
+                        "truck_alias",
+                        "status",
+                        "site_id",
+                        "confidence",
+                        "timestamp_effective",
+                        "display_name",
+                    ],
+                    r,
+                )
+            )
+            for r in rows
+        ]
+    }

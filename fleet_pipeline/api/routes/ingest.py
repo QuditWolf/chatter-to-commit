@@ -12,8 +12,10 @@ import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks
+import pytz
 from pydantic import BaseModel
+
+from fleet_pipeline.utils import now_ist
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +35,9 @@ class WAMessageRequest(BaseModel):
     raw_text: str
     received_at: str  # ISO string from Node
     message_type: str = "fleet_event"
-    source_group: str = "fleet"  # "fleet" (read-only) | "control" (HITL + shift signals)
+    source_group: str = (
+        "fleet"  # "fleet" (read-only) | "control" (HITL + shift signals)
+    )
     quoted_wa_message_id: Optional[str] = (
         None  # set when operator replies to a bot message
     )
@@ -166,12 +170,12 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
             pass
 
     # Determine if this message is from the control group
-    is_control = (
-        req.source_group == "control"
-        or (WA_CONTROL_GROUP_JID and req.group_jid == WA_CONTROL_GROUP_JID)
+    is_control = req.source_group == "control" or (
+        WA_CONTROL_GROUP_JID and req.group_jid == WA_CONTROL_GROUP_JID
     )
 
     from fleet_pipeline.utils import to_ist as _to_ist
+
     _ts_ist = _to_ist(req.received_at)
 
     # ── Control group: HITL answers, shift signals, summary requests ──────────
@@ -179,11 +183,16 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
         # HITL reply routing — operator replied to a bot clarification
         if req.quoted_wa_message_id:
             with db.db_conn(DB_PATH) as conn:
-                hitl_q = db.get_open_question_by_bot_wa_id(conn, req.quoted_wa_message_id)
+                hitl_q = db.get_open_question_by_bot_wa_id(
+                    conn, req.quoted_wa_message_id
+                )
             if hitl_q:
                 log.info(
                     "[CTRL] %s | from=%s | HITL reply → question %s | %r",
-                    _ts_ist, req.sender_phone, hitl_q["question_id"], req.raw_text[:80]
+                    _ts_ist,
+                    req.sender_phone,
+                    hitl_q["question_id"],
+                    req.raw_text[:80],
                 )
                 background_tasks.add_task(
                     _handle_wa_hitl_answer,
@@ -200,13 +209,18 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
             else:
                 log.info(
                     "[CTRL] %s | from=%s | reply to unknown bot msg %s (no open HITL) — routing as control msg | %r",
-                    _ts_ist, req.sender_phone, req.quoted_wa_message_id[:12], req.raw_text[:80]
+                    _ts_ist,
+                    req.sender_phone,
+                    req.quoted_wa_message_id[:12],
+                    req.raw_text[:80],
                 )
 
         else:
             log.info(
                 "[CTRL] %s | from=%s | plain control message | %r",
-                _ts_ist, req.sender_phone, req.raw_text[:80]
+                _ts_ist,
+                req.sender_phone,
+                req.raw_text[:80],
             )
 
         # Shift signals + summary requests
@@ -221,7 +235,12 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
 
     # ── Fleet group: pipeline only — NEVER send messages back ─────────────────
     # All bot output (HITL questions, summaries) goes to the control group.
-    log.info("[FLEET] %s | from=%s | queuing pipeline | %r", _ts_ist, req.sender_phone, req.raw_text[:80])
+    log.info(
+        "[FLEET] %s | from=%s | queuing pipeline | %r",
+        _ts_ist,
+        req.sender_phone,
+        req.raw_text[:80],
+    )
     bot_group_jid = WA_CONTROL_GROUP_JID or req.group_jid
 
     await ws_manager.broadcast(
@@ -267,12 +286,14 @@ async def _handle_control_message(
     """
     import re
     import sqlite3
-    from datetime import datetime, timezone
     from fleet_pipeline.config import DB_PATH
-    from fleet_pipeline.pipeline.shift_detector import detect_shift_signal, ShiftDetector
+    from fleet_pipeline.pipeline.shift_detector import (
+        detect_shift_signal,
+        ShiftDetector,
+    )
     from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group
     from fleet_pipeline.api.main import ws_manager
-    from fleet_pipeline.utils import to_ist
+    from fleet_pipeline.utils import to_ist, now_ist
 
     text = raw_text.strip()
     _ts_ist = to_ist(timestamp_iso) if timestamp_iso else "?"
@@ -289,7 +310,10 @@ async def _handle_control_message(
     # end the shift via phrases like "Loading Over" or "ALL trucks LEFT".
     signal = detect_shift_signal(text) if not is_reply else None
     if is_reply and detect_shift_signal(text):
-        log.info("[CTRL] Shift signal %r suppressed — message is a reply (HITL answer)", detect_shift_signal(text))
+        log.info(
+            "[CTRL] Shift signal %r suppressed — message is a reply (HITL answer)",
+            detect_shift_signal(text),
+        )
     if signal in ("start", "end"):
         log.info("[CTRL] Shift %s signal detected — processing", signal)
         try:
@@ -302,9 +326,9 @@ async def _handle_control_message(
             try:
                 ts = datetime.fromisoformat(timestamp_iso)
                 if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
+                    ts = ts.replace(tzinfo=pytz.UTC)
             except Exception:
-                ts = datetime.now(timezone.utc)
+                ts = now_ist()
 
             sd = ShiftDetector(conn)
             if signal == "start":
@@ -329,12 +353,16 @@ async def _handle_control_message(
     _SUMMARY_RE = [
         re.compile(r"\b(summary|sumary|summery)\b", re.I),
         re.compile(r"\bsend\s+(report|summary)\b", re.I),
-        re.compile(r"\b(report|give|send)\s+(me\s+)?(the\s+)?(total|count|summary)\b", re.I),
+        re.compile(
+            r"\b(report|give|send)\s+(me\s+)?(the\s+)?(total|count|summary)\b", re.I
+        ),
         re.compile(r"\bhow\s+many\b", re.I),
     ]
     for pat in _SUMMARY_RE:
         if pat.search(text):
-            log.info("[CTRL] Summary request matched — sending on-demand summary to group")
+            log.info(
+                "[CTRL] Summary request matched — sending on-demand summary to group"
+            )
             try:
                 send_summary_to_group(group_jid, DB_PATH)
             except Exception as exc:
@@ -350,6 +378,7 @@ async def _handle_control_message(
         src_raw, dst_raw = m.group(1).strip(), m.group(2).strip()
         log.info("[CTRL] MERGE command: %s → %s", src_raw, dst_raw)
         import sqlite3 as _sq
+
         try:
             conn = _sq.connect(DB_PATH)
             conn.row_factory = _sq.Row
@@ -363,7 +392,9 @@ async def _handle_control_message(
                 ).fetchone()
                 if row:
                     return row[0]
-                for r in conn.execute("SELECT truck_id, aliases FROM trucks WHERE is_active=1"):
+                for r in conn.execute(
+                    "SELECT truck_id, aliases FROM trucks WHERE is_active=1"
+                ):
                     try:
                         aliases = __import__("json").loads(r["aliases"] or "[]")
                     except Exception:
@@ -376,14 +407,19 @@ async def _handle_control_message(
             dst_id = _resolve_truck(dst_raw)
 
             from fleet_pipeline.db import database as _db
-            from fleet_pipeline.pipeline.wa_notifier import _post_send_message, _resolve_group_jid
+            from fleet_pipeline.pipeline.wa_notifier import (
+                _post_send_message,
+                _resolve_group_jid,
+            )
 
             if not src_id or not dst_id:
                 missing = src_raw if not src_id else dst_raw
                 log.warning("[CTRL] MERGE failed — trolley '%s' not found", missing)
                 notify_jid = _resolve_group_jid(group_jid)
                 if notify_jid:
-                    _post_send_message(notify_jid, f"⚠️ MERGE failed: trolley '{missing}' not found.")
+                    _post_send_message(
+                        notify_jid, f"⚠️ MERGE failed: trolley '{missing}' not found."
+                    )
                 conn.close()
                 return
 
@@ -391,8 +427,13 @@ async def _handle_control_message(
             conn.commit()
             conn.close()
 
-            log.info("[MERGE] %s → %s: %d events reassigned, aliases added: %s",
-                     src_id, dst_id, result["events_reassigned"], result["aliases_added"])
+            log.info(
+                "[MERGE] %s → %s: %d events reassigned, aliases added: %s",
+                src_id,
+                dst_id,
+                result["events_reassigned"],
+                result["aliases_added"],
+            )
 
             notify_jid = _resolve_group_jid(group_jid)
             if notify_jid:
@@ -404,12 +445,15 @@ async def _handle_control_message(
                 )
 
             from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+
             invalidate_kpi_cache()
         except Exception as exc:
             log.error("MERGE command failed: %s", exc)
         return
 
-    log.info("[CTRL] No action taken — message did not match shift signal, summary, or MERGE pattern")
+    log.info(
+        "[CTRL] No action taken — message did not match shift signal, summary, or MERGE pattern"
+    )
 
 
 async def _handle_wa_hitl_answer(
@@ -468,11 +512,10 @@ async def ingest_manual(req: ManualMessageRequest, background_tasks: BackgroundT
       2. commit_created    — when LLM finishes
     """
     from uuid import uuid4
-    from datetime import datetime, timezone
     from fleet_pipeline.api.main import ws_manager
 
     temp_id = str(uuid4())
-    timestamp = req.timestamp_iso or datetime.now(timezone.utc).isoformat()
+    timestamp = req.timestamp_iso or now_ist_iso()
 
     # Broadcast immediately so frontend shows pending state in message map
     await ws_manager.broadcast(
@@ -750,10 +793,15 @@ async def wa_message_deleted(req: WAMessageDeletedRequest):
 
     if deleted_events > 0:
         from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+
         invalidate_kpi_cache()
         await ws_manager.broadcast("fleet_state_updated", {"source": "message_deleted"})
 
-    return {"deleted": True, "wa_message_id": wa_message_id, "events_deleted": deleted_events}
+    return {
+        "deleted": True,
+        "wa_message_id": wa_message_id,
+        "events_deleted": deleted_events,
+    }
 
 
 @router.get("/status")

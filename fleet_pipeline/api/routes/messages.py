@@ -6,8 +6,9 @@ GET  /api/messages/:wa_message_id     — single message + commit + corrections
 POST /api/commits/:commit_id/correct  — submit correction
 GET  /api/commits/:commit_id/corrections — list corrections for a commit
 """
+
 import re
-from datetime import datetime, timezone
+
 from typing import Optional
 from uuid import uuid4
 
@@ -16,12 +17,13 @@ from pydantic import BaseModel
 
 from fleet_pipeline.config import DB_PATH
 from fleet_pipeline.db import database as db
+from fleet_pipeline.utils import now_ist_iso
 
 router = APIRouter(tags=["messages"])
 
 
 class CorrectionRequest(BaseModel):
-    field: str           # truck_id | status | site_id | shift_id
+    field: str  # truck_id | status | site_id | shift_id
     corrected_value: str
     note: Optional[str] = None
     corrected_by: Optional[str] = "operator"
@@ -38,7 +40,7 @@ class ManualCommitRequest(BaseModel):
     truck_id: str
     status: str
     site_id: str
-    msg_id: Optional[str] = None              # link to existing raw message
+    msg_id: Optional[str] = None  # link to existing raw message
     timestamp_effective: Optional[str] = None  # ISO8601; defaults to now
     note: Optional[str] = None
     created_by: Optional[str] = "operator"
@@ -59,7 +61,7 @@ def list_commits(
     limit: int = Query(50, ge=1, le=200),
     truck_id: str = Query(""),
     site_id: str = Query(""),
-    status: str = Query(""),       # ENTER | LS | LO | LEFT | US | UO
+    status: str = Query(""),  # ENTER | LS | LO | LEFT | US | UO
     commit_status: str = Query(""),  # COMMITTED | FLAGGED | HELD
     search: str = Query(""),
 ):
@@ -84,7 +86,9 @@ def list_commits(
         params.append(commit_status.upper())
     if search:
         like = f"%{search}%"
-        where.append("(r.raw_text LIKE ? OR e.truck_id LIKE ? OR e.site_id LIKE ? OR e.reasoning LIKE ?)")
+        where.append(
+            "(r.raw_text LIKE ? OR e.truck_id LIKE ? OR e.site_id LIKE ? OR e.reasoning LIKE ?)"
+        )
         params.extend([like, like, like, like])
 
     where_sql = "WHERE " + " AND ".join(where)
@@ -92,7 +96,7 @@ def list_commits(
     with db.db_conn(DB_PATH) as conn:
         total = conn.execute(
             f"SELECT COUNT(*) FROM events e LEFT JOIN raw_messages r ON r.msg_id=e.msg_id {where_sql}",
-            params
+            params,
         ).fetchone()[0]
 
         rows = conn.execute(
@@ -109,9 +113,9 @@ def list_commits(
                 LEFT JOIN trucks t ON t.truck_id = e.truck_id
                 LEFT JOIN sites  s ON s.site_id  = e.site_id
                 {where_sql}
-                ORDER BY e.timestamp_effective ASC, e.created_at ASC
+                ORDER BY e.timestamp_effective DESC, e.created_at DESC
                 LIMIT ? OFFSET ?""",
-            params + [limit, (page - 1) * limit]
+            params + [limit, (page - 1) * limit],
         ).fetchall()
 
     items = []
@@ -155,15 +159,20 @@ def list_commits(
 def list_messages(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
-    status: str = Query("all"),   # all | committed | held | flagged | corrected
+    status: str = Query("all"),  # all | committed | held | flagged | corrected
     search: str = Query(""),
     hide_noise: bool = Query(False),
 ):
     """Paginated message-commit map for the operator panel."""
     with db.db_conn(DB_PATH) as conn:
-        result = db.get_messages_page(conn, page=page, limit=limit,
-                                       status_filter=status, search=search,
-                                       hide_noise=hide_noise)
+        result = db.get_messages_page(
+            conn,
+            page=page,
+            limit=limit,
+            status_filter=status,
+            search=search,
+            hide_noise=hide_noise,
+        )
     return result
 
 
@@ -194,7 +203,9 @@ def correct_commit(commit_id: str, req: CorrectionRequest):
     """
     valid_fields = {"truck_id", "status", "site_id", "shift_id"}
     if req.field not in valid_fields:
-        raise HTTPException(status_code=400, detail=f"field must be one of {valid_fields}")
+        raise HTTPException(
+            status_code=400, detail=f"field must be one of {valid_fields}"
+        )
 
     with db.db_conn(DB_PATH) as conn:
         event = conn.execute(
@@ -207,26 +218,34 @@ def correct_commit(commit_id: str, req: CorrectionRequest):
         if event_dict["commit_status"] not in ("COMMITTED", "FLAGGED", "HELD"):
             raise HTTPException(
                 status_code=400,
-                detail=f"Can only correct COMMITTED, FLAGGED, or HELD events, got {event_dict['commit_status']}"
+                detail=f"Can only correct COMMITTED, FLAGGED, or HELD events, got {event_dict['commit_status']}",
             )
 
         original_value = event_dict.get(req.field)
         correction_id = str(uuid4())
-        now = datetime.now(timezone.utc).isoformat()
+        now = now_ist_iso()
 
-        db.insert_correction(conn, {
-            "correction_id": correction_id,
-            "original_event_id": commit_id,
-            "corrected_by": req.corrected_by or "operator",
-            "corrected_at": now,
-            "field_changed": req.field,
-            "original_value": str(original_value) if original_value is not None else None,
-            "corrected_value": req.corrected_value,
-            "note": req.note,
-        })
+        db.insert_correction(
+            conn,
+            {
+                "correction_id": correction_id,
+                "original_event_id": commit_id,
+                "corrected_by": req.corrected_by or "operator",
+                "corrected_at": now,
+                "field_changed": req.field,
+                "original_value": str(original_value)
+                if original_value is not None
+                else None,
+                "corrected_value": req.corrected_value,
+                "note": req.note,
+            },
+        )
 
         db.log_audit(
-            conn, "CORRECTION", "events", commit_id,
+            conn,
+            "CORRECTION",
+            "events",
+            commit_id,
             old_value={req.field: original_value},
             new_value={req.field: req.corrected_value},
             triggered_by=req.corrected_by or "operator",
@@ -247,25 +266,34 @@ async def force_commit_event(event_id: str):
     from fleet_pipeline.api.main import ws_manager
     from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_ist_iso()
 
     with db.db_conn(DB_PATH) as conn:
-        event = conn.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone()
+        event = conn.execute(
+            "SELECT * FROM events WHERE event_id=?", (event_id,)
+        ).fetchone()
         if not event:
             raise HTTPException(status_code=404, detail="Event not found")
         ev = dict(event)
         if ev["commit_status"] not in ("FLAGGED", "HELD"):
-            raise HTTPException(status_code=400,
-                detail=f"Can only force-commit FLAGGED or HELD events, got {ev['commit_status']}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Can only force-commit FLAGGED or HELD events, got {ev['commit_status']}",
+            )
 
         conn.execute(
             "UPDATE events SET commit_status='COMMITTED', commit_path='manual', corrected=1, corrected_at=? WHERE event_id=?",
             (now, event_id),
         )
-        db.log_audit(conn, "FORCE_COMMIT", "events", event_id,
-                     old_value={"commit_status": ev["commit_status"]},
-                     new_value={"commit_status": "COMMITTED"},
-                     triggered_by="operator")
+        db.log_audit(
+            conn,
+            "FORCE_COMMIT",
+            "events",
+            event_id,
+            old_value={"commit_status": ev["commit_status"]},
+            new_value={"commit_status": "COMMITTED"},
+            triggered_by="operator",
+        )
 
     invalidate_kpi_cache()
     await ws_manager.broadcast("fleet_state_updated", {"source": "force_commit"})
@@ -273,6 +301,7 @@ async def force_commit_event(event_id: str):
 
 
 VALID_STATUSES = {"ENTER", "LS", "LO", "LEFT", "US", "UO"}
+
 
 @router.post("/api/events/{event_id}/map")
 async def map_event(event_id: str, req: MapEventRequest):
@@ -284,16 +313,22 @@ async def map_event(event_id: str, req: MapEventRequest):
     from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
 
     if req.status not in VALID_STATUSES:
-        raise HTTPException(status_code=400, detail=f"status must be one of {VALID_STATUSES}")
+        raise HTTPException(
+            status_code=400, detail=f"status must be one of {VALID_STATUSES}"
+        )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_ist_iso()
 
     with db.db_conn(DB_PATH) as conn:
-        event = conn.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone()
+        event = conn.execute(
+            "SELECT * FROM events WHERE event_id=?", (event_id,)
+        ).fetchone()
         if not event:
             raise HTTPException(status_code=404, detail="Event not found")
         if dict(event)["commit_status"] != "HELD":
-            raise HTTPException(status_code=400, detail="Only HELD events can be manually mapped")
+            raise HTTPException(
+                status_code=400, detail="Only HELD events can be manually mapped"
+            )
 
         conn.execute(
             """UPDATE events SET
@@ -310,21 +345,29 @@ async def map_event(event_id: str, req: MapEventRequest):
             (f"%{event_id}%",),
         )
 
-        db.insert_correction(conn, {
-            "correction_id": str(uuid4()),
-            "original_event_id": event_id,
-            "corrected_by": req.mapped_by or "operator",
-            "corrected_at": now,
-            "field_changed": "manual_map",
-            "original_value": None,
-            "corrected_value": f"{req.truck_id} {req.status} {req.site_id}",
-            "note": "Manually mapped by operator",
-        })
+        db.insert_correction(
+            conn,
+            {
+                "correction_id": str(uuid4()),
+                "original_event_id": event_id,
+                "corrected_by": req.mapped_by or "operator",
+                "corrected_at": now,
+                "field_changed": "manual_map",
+                "original_value": None,
+                "corrected_value": f"{req.truck_id} {req.status} {req.site_id}",
+                "note": "Manually mapped by operator",
+            },
+        )
 
     invalidate_kpi_cache()
     await ws_manager.broadcast("fleet_state_updated", {"source": "manual_map"})
-    return {"event_id": event_id, "mapped": True,
-            "truck_id": req.truck_id, "status": req.status, "site_id": req.site_id}
+    return {
+        "event_id": event_id,
+        "mapped": True,
+        "truck_id": req.truck_id,
+        "status": req.status,
+        "site_id": req.site_id,
+    }
 
 
 @router.get("/api/commits/{commit_id}/corrections")
@@ -345,28 +388,41 @@ async def create_manual_commit(req: ManualCommitRequest):
     from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
 
     if req.status not in VALID_STATUSES:
-        raise HTTPException(status_code=400, detail=f"status must be one of {VALID_STATUSES}")
+        raise HTTPException(
+            status_code=400, detail=f"status must be one of {VALID_STATUSES}"
+        )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_ist_iso()
     event_id = str(uuid4())
 
     with db.db_conn(DB_PATH) as conn:
         # Verify truck and site exist
-        truck = conn.execute("SELECT truck_id FROM trucks WHERE truck_id=?", (req.truck_id,)).fetchone()
+        truck = conn.execute(
+            "SELECT truck_id FROM trucks WHERE truck_id=?", (req.truck_id,)
+        ).fetchone()
         if not truck:
-            raise HTTPException(status_code=400, detail=f"Unknown truck_id: {req.truck_id}")
-        site = conn.execute("SELECT site_id FROM sites WHERE site_id=?", (req.site_id,)).fetchone()
+            raise HTTPException(
+                status_code=400, detail=f"Unknown truck_id: {req.truck_id}"
+            )
+        site = conn.execute(
+            "SELECT site_id FROM sites WHERE site_id=?", (req.site_id,)
+        ).fetchone()
         if not site:
-            raise HTTPException(status_code=400, detail=f"Unknown site_id: {req.site_id}")
+            raise HTTPException(
+                status_code=400, detail=f"Unknown site_id: {req.site_id}"
+            )
 
         # If msg_id provided, verify it exists and optionally borrow its timestamp
         linked_msg_id = None
         if req.msg_id:
             msg_row = conn.execute(
-                "SELECT msg_id, timestamp_iso FROM raw_messages WHERE msg_id=?", (req.msg_id,)
+                "SELECT msg_id, timestamp_iso FROM raw_messages WHERE msg_id=?",
+                (req.msg_id,),
             ).fetchone()
             if not msg_row:
-                raise HTTPException(status_code=404, detail=f"Message not found: {req.msg_id}")
+                raise HTTPException(
+                    status_code=404, detail=f"Message not found: {req.msg_id}"
+                )
             linked_msg_id = msg_row["msg_id"]
 
         ts = req.timestamp_effective or now
@@ -374,49 +430,70 @@ async def create_manual_commit(req: ManualCommitRequest):
         # Get shift for this timestamp
         shift_row = conn.execute(
             "SELECT shift_id FROM shifts WHERE started_at <= ? ORDER BY started_at DESC LIMIT 1",
-            (ts,)
+            (ts,),
         ).fetchone()
         shift_id = shift_row[0] if shift_row else None
 
         # Derive short alias: use first alias from trucks.aliases JSON, else strip leading T
-        truck_row = conn.execute("SELECT display_name, aliases FROM trucks WHERE truck_id=?", (req.truck_id,)).fetchone()
+        truck_row = conn.execute(
+            "SELECT display_name, aliases FROM trucks WHERE truck_id=?", (req.truck_id,)
+        ).fetchone()
         if truck_row and truck_row["aliases"]:
             import json as _json
+
             try:
                 aliases = _json.loads(truck_row["aliases"])
                 truck_alias = aliases[0] if aliases else req.truck_id
             except Exception:
                 truck_alias = req.truck_id
         else:
-            truck_alias = req.truck_id[1:] if re.match(r'^T[A-Z0-9]{1,2}$', req.truck_id) else req.truck_id
+            truck_alias = (
+                req.truck_id[1:]
+                if re.match(r"^T[A-Z0-9]{1,2}$", req.truck_id)
+                else req.truck_id
+            )
 
-        site_row = conn.execute("SELECT display_name FROM sites WHERE site_id=?", (req.site_id,)).fetchone()
+        site_row = conn.execute(
+            "SELECT display_name FROM sites WHERE site_id=?", (req.site_id,)
+        ).fetchone()
         site_alias = site_row["display_name"] if site_row else req.site_id
 
-        db.insert_event(conn, {
-            "event_id": event_id,
-            "msg_id": linked_msg_id,
-            "truck_id": req.truck_id,
-            "truck_alias": truck_alias,
-            "status": req.status,
-            "site_id": req.site_id,
-            "site_alias": site_alias,
-            "material": None,
-            "timestamp_effective": ts,
-            "inferred": False,
-            "confidence": 1.0,
-            "reasoning": req.note or "Manually entered by operator",
-            "commit_status": "COMMITTED",
-            "commit_path": "manual",
-            "shift_id": shift_id,
-        })
+        db.insert_event(
+            conn,
+            {
+                "event_id": event_id,
+                "msg_id": linked_msg_id,
+                "truck_id": req.truck_id,
+                "truck_alias": truck_alias,
+                "status": req.status,
+                "site_id": req.site_id,
+                "site_alias": site_alias,
+                "material": None,
+                "timestamp_effective": ts,
+                "inferred": False,
+                "confidence": 1.0,
+                "reasoning": req.note or "Manually entered by operator",
+                "commit_status": "COMMITTED",
+                "commit_path": "manual",
+                "shift_id": shift_id,
+            },
+        )
         conn.execute(
             "UPDATE events SET corrected=1, corrected_at=? WHERE event_id=?",
-            (now, event_id)
+            (now, event_id),
         )
-        db.log_audit(conn, "MANUAL_ENTRY", "events", event_id,
-                     new_value={"truck_id": req.truck_id, "status": req.status, "site_id": req.site_id},
-                     triggered_by=req.created_by or "operator")
+        db.log_audit(
+            conn,
+            "MANUAL_ENTRY",
+            "events",
+            event_id,
+            new_value={
+                "truck_id": req.truck_id,
+                "status": req.status,
+                "site_id": req.site_id,
+            },
+            triggered_by=req.created_by or "operator",
+        )
 
     invalidate_kpi_cache()
     await ws_manager.broadcast("fleet_state_updated", {"source": "manual_entry"})
@@ -433,12 +510,16 @@ async def edit_commit(commit_id: str, req: EditCommitRequest):
     from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
 
     if req.status and req.status not in VALID_STATUSES:
-        raise HTTPException(status_code=400, detail=f"status must be one of {VALID_STATUSES}")
+        raise HTTPException(
+            status_code=400, detail=f"status must be one of {VALID_STATUSES}"
+        )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = now_ist_iso()
 
     with db.db_conn(DB_PATH) as conn:
-        event = conn.execute("SELECT * FROM events WHERE event_id=?", (commit_id,)).fetchone()
+        event = conn.execute(
+            "SELECT * FROM events WHERE event_id=?", (commit_id,)
+        ).fetchone()
         if not event:
             raise HTTPException(status_code=404, detail="Commit not found")
         ev = dict(event)
@@ -465,21 +546,31 @@ async def edit_commit(commit_id: str, req: EditCommitRequest):
 
         # Log each changed field as a correction
         for field, new_val in updates.items():
-            db.insert_correction(conn, {
-                "correction_id": str(uuid4()),
-                "original_event_id": commit_id,
-                "corrected_by": req.edited_by or "operator",
-                "corrected_at": now,
-                "field_changed": field,
-                "original_value": str(ev.get(field)) if ev.get(field) is not None else None,
-                "corrected_value": str(new_val),
-                "note": req.note,
-            })
+            db.insert_correction(
+                conn,
+                {
+                    "correction_id": str(uuid4()),
+                    "original_event_id": commit_id,
+                    "corrected_by": req.edited_by or "operator",
+                    "corrected_at": now,
+                    "field_changed": field,
+                    "original_value": str(ev.get(field))
+                    if ev.get(field) is not None
+                    else None,
+                    "corrected_value": str(new_val),
+                    "note": req.note,
+                },
+            )
 
-        db.log_audit(conn, "EDIT_COMMIT", "events", commit_id,
-                     old_value={k: ev.get(k) for k in updates},
-                     new_value=updates,
-                     triggered_by=req.edited_by or "operator")
+        db.log_audit(
+            conn,
+            "EDIT_COMMIT",
+            "events",
+            commit_id,
+            old_value={k: ev.get(k) for k in updates},
+            new_value=updates,
+            triggered_by=req.edited_by or "operator",
+        )
 
     invalidate_kpi_cache()
     await ws_manager.broadcast("fleet_state_updated", {"source": "edit_commit"})
@@ -493,7 +584,9 @@ async def delete_commit(commit_id: str):
     from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
 
     with db.db_conn(DB_PATH) as conn:
-        event = conn.execute("SELECT * FROM events WHERE event_id=?", (commit_id,)).fetchone()
+        event = conn.execute(
+            "SELECT * FROM events WHERE event_id=?", (commit_id,)
+        ).fetchone()
         if not event:
             raise HTTPException(status_code=404, detail="Commit not found")
         ev = dict(event)
@@ -503,11 +596,100 @@ async def delete_commit(commit_id: str):
         conn.execute(
             "UPDATE events SET commit_status='DELETED' WHERE event_id=?", (commit_id,)
         )
-        db.log_audit(conn, "DELETE_COMMIT", "events", commit_id,
-                     old_value={"commit_status": ev["commit_status"]},
-                     new_value={"commit_status": "DELETED"},
-                     triggered_by="operator")
+        db.log_audit(
+            conn,
+            "DELETE_COMMIT",
+            "events",
+            commit_id,
+            old_value={"commit_status": ev["commit_status"]},
+            new_value={"commit_status": "DELETED"},
+            triggered_by="operator",
+        )
 
     invalidate_kpi_cache()
     await ws_manager.broadcast("fleet_state_updated", {"source": "delete_commit"})
     return {"event_id": commit_id, "deleted": True}
+
+
+# ── Truck merge ──────────────────────────────────────────────────────────────
+
+
+class MergeRequest(BaseModel):
+    src_id: str
+    dst_id: str
+
+
+def _resolve_truck_id(conn, alias_or_id: str) -> Optional[str]:
+    """Resolve a truck alias or ID to a truck_id."""
+    row = conn.execute(
+        "SELECT truck_id FROM trucks WHERE truck_id=? COLLATE NOCASE AND is_active=1",
+        (alias_or_id,),
+    ).fetchone()
+    if row:
+        return row[0]
+    for r in conn.execute("SELECT truck_id, aliases FROM trucks WHERE is_active=1"):
+        try:
+            import json
+
+            aliases = json.loads(r["aliases"] or "[]")
+        except Exception:
+            aliases = []
+        if alias_or_id.lower() in [a.lower() for a in aliases]:
+            return r[0]
+    return None
+
+
+@router.post("/api/trucks/merge")
+def merge_trucks(req: MergeRequest):
+    """
+    Merge src truck into dst truck.
+    Copies all src aliases to dst, reassigns all src events to dst,
+    then deactivates the src truck.
+    """
+    src_raw = req.src_id.strip()
+    dst_raw = req.dst_id.strip()
+
+    if not src_raw or not dst_raw:
+        raise HTTPException(status_code=400, detail="src_id and dst_id are required")
+    if src_raw.lower() == dst_raw.lower():
+        raise HTTPException(status_code=400, detail="src and dst cannot be the same")
+
+    with db.db_conn(DB_PATH) as conn:
+        src_id = _resolve_truck_id(conn, src_raw)
+        dst_id = _resolve_truck_id(conn, dst_raw)
+
+        if not src_id:
+            raise HTTPException(
+                status_code=404, detail=f"Source trolley '{src_raw}' not found"
+            )
+        if not dst_id:
+            raise HTTPException(
+                status_code=404, detail=f"Destination trolley '{dst_raw}' not found"
+            )
+
+        result = db.merge_trucks(conn, src_id, dst_id)
+
+    # Invalidate caches and broadcast
+    try:
+        from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+
+        invalidate_kpi_cache()
+    except Exception:
+        pass
+    try:
+        from fleet_pipeline.api.main import ws_manager
+        import asyncio
+
+        asyncio.create_task(
+            ws_manager.broadcast("fleet_state_updated", {"source": "merge_trucks"})
+        )
+    except Exception:
+        pass
+
+    return {
+        "merged": True,
+        "src_id": src_id,
+        "dst_id": dst_id,
+        "aliases_added": result.get("aliases_added", []),
+        "events_reassigned": result.get("events_reassigned", 0),
+    }

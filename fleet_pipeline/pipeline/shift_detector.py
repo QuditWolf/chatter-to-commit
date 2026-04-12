@@ -30,6 +30,7 @@ Operator API helpers (module-level, no singleton state needed):
    operator_end(db_path)     → end the current shift now
    operator_resume(db_path)  → reopen the most recently ended shift
 """
+
 import json
 import logging
 import sqlite3
@@ -38,11 +39,20 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 import re
+import pytz
+
+from fleet_pipeline.utils import now_ist
+
+_IST = pytz.timezone("Asia/Kolkata")
 
 log = logging.getLogger(__name__)
 
-INACTIVITY_GAP = 10800  # seconds — 3 hours (kept for reference; no longer auto-starts shifts)
-AUTO_END_GAP   = 10800  # seconds — 3 hours (background task closes shift with no activity)
+INACTIVITY_GAP = (
+    10800  # seconds — 3 hours (kept for reference; no longer auto-starts shifts)
+)
+AUTO_END_GAP = (
+    10800  # seconds — 3 hours (background task closes shift with no activity)
+)
 
 
 # ── WA signal patterns ────────────────────────────────────────────────────────
@@ -78,13 +88,16 @@ def detect_shift_signal(text: str) -> Optional[str]:
 
 # ── ShiftDetector ─────────────────────────────────────────────────────────────
 
+
 class ShiftDetector:
     """
     Stateful shift detector backed by SQLite.
     Create a new instance per pipeline call — all state lives in the DB.
     """
 
-    def __init__(self, conn: sqlite3.Connection, simulation_run_id: Optional[str] = None):
+    def __init__(
+        self, conn: sqlite3.Connection, simulation_run_id: Optional[str] = None
+    ):
         self.conn = conn
         self.simulation_run_id = simulation_run_id
         self._active = self._load_active()
@@ -170,17 +183,23 @@ class ShiftDetector:
         if self._active:
             self._end(ts)
 
-        shift_id   = str(uuid4())
+        shift_id = str(uuid4())
         shift_name = self._make_name(ts)
-        day_num    = self._day_count(ts)  # already incremented by _make_name logic, so recount
+        day_num = self._day_count(
+            ts
+        )  # already incremented by _make_name logic, so recount
 
         # Recount after potential _end() above
         day_num = self._day_count(ts) + 1
 
         # Extract default site(s) from shift start message (e.g. "shift start KN4" or "volunteers reach KN4 and SOC")
-        default_site_ids = _extract_sites_from_text(self.conn, raw_text) if raw_text else []
+        default_site_ids = (
+            _extract_sites_from_text(self.conn, raw_text) if raw_text else []
+        )
         default_site_id = default_site_ids[0] if default_site_ids else None
-        default_site_ids_json = json.dumps(default_site_ids) if default_site_ids else None
+        default_site_ids_json = (
+            json.dumps(default_site_ids) if default_site_ids else None
+        )
 
         try:
             self.conn.execute(
@@ -188,12 +207,22 @@ class ShiftDetector:
                    (shift_id, shift_number, shift_name, started_at, detection_method,
                     simulation_run_id, default_site_id, default_site_ids)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (shift_id, day_num, shift_name, ts.isoformat(), method,
-                 self.simulation_run_id, default_site_id, default_site_ids_json),
+                (
+                    shift_id,
+                    day_num,
+                    shift_name,
+                    ts.isoformat(),
+                    method,
+                    self.simulation_run_id,
+                    default_site_id,
+                    default_site_ids_json,
+                ),
             )
             log.info(
                 "[SHIFT] Started: %s (method=%s default_sites=%s)",
-                shift_name, method, default_site_ids or "none",
+                shift_name,
+                method,
+                default_site_ids or "none",
             )
             self._active = {
                 "shift_id": shift_id,
@@ -224,6 +253,7 @@ class ShiftDetector:
 
 # ── Operator API helpers ──────────────────────────────────────────────────────
 
+
 def _open_conn(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -237,7 +267,7 @@ def operator_start(db_path: str) -> dict:
     conn = _open_conn(db_path)
     try:
         sd = ShiftDetector(conn)
-        sd._start_new(datetime.now(timezone.utc), method="operator")
+        sd._start_new(now_ist(), method="operator")
         conn.commit()
         return sd._active or {}
     finally:
@@ -251,7 +281,7 @@ def operator_end(db_path: str) -> bool:
         sd = ShiftDetector(conn)
         if not sd._active:
             return False
-        sd._end(datetime.now(timezone.utc))
+        sd._end(now_ist())
         conn.commit()
         return True
     finally:
@@ -275,7 +305,7 @@ def operator_resume(db_path: str) -> Optional[dict]:
         if active:
             conn.execute(
                 "UPDATE shifts SET ended_at=? WHERE shift_id=?",
-                (datetime.now(timezone.utc).isoformat(), active["shift_id"]),
+                (now_ist().isoformat(), active["shift_id"]),
             )
         # Reopen the last ended shift
         conn.execute(
@@ -310,7 +340,9 @@ def _extract_sites_from_text(conn: sqlite3.Connection, text: str) -> List[str]:
     if not text:
         return []
     try:
-        rows = conn.execute("SELECT site_id, aliases FROM sites WHERE is_active=1").fetchall()
+        rows = conn.execute(
+            "SELECT site_id, aliases FROM sites WHERE is_active=1"
+        ).fetchall()
     except Exception:
         return []
 
@@ -339,12 +371,28 @@ def _extract_sites_from_text(conn: sqlite3.Connection, text: str) -> List[str]:
 
 
 def _parse_iso(ts: str) -> Optional[datetime]:
+    """Parse an ISO timestamp string to a timezone-aware IST datetime."""
     if not ts:
         return None
     try:
         dt = datetime.fromisoformat(ts)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
+        if dt.tzinfo != _IST:
+            dt = dt.astimezone(_IST)
+        return dt
+    except Exception:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # Always convert to IST for consistent comparison
+        import pytz
+
+        IST = pytz.timezone("Asia/Kolkata")
+        if dt.tzinfo != IST:
+            dt = dt.astimezone(IST)
         return dt
     except Exception:
         return None

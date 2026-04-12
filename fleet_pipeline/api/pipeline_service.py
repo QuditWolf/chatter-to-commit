@@ -12,13 +12,13 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
 log = logging.getLogger(__name__)
 
 from fleet_pipeline.config import DB_PATH, LLM_MOCK, MODEL_NAME
+from fleet_pipeline.utils import now_ist
 from fleet_pipeline.audit import audit
 from fleet_pipeline.db import database as db
 from fleet_pipeline.pipeline.level1 import parse_timestamp
@@ -90,14 +90,12 @@ def process_raw_text(
     """
     _t_start = time.monotonic()
     _ts_ist = to_ist(timestamp_iso) if timestamp_iso else "?"
-    log.info("[RECV] %s | from=%s | ts=%s | %r", source, sender_name, _ts_ist, raw_text[:100])
+    log.info(
+        "[RECV] %s | from=%s | ts=%s | %r", source, sender_name, _ts_ist, raw_text[:100]
+    )
 
     if timestamp_iso is None:
-        timestamp_iso = (
-            datetime.now(timezone.utc)
-            .astimezone(__import__("pytz").timezone("Asia/Kolkata"))
-            .isoformat()
-        )
+        timestamp_iso = now_ist().isoformat()
 
     # Use provided wa_message_id as msg_id so HITL questions link to the right WA message
     msg_id = wa_message_id or str(uuid4())
@@ -226,7 +224,8 @@ def process_raw_text(
         summary.get("committed", 0),
         summary.get("flagged", 0),
         summary.get("hitl_created", 0),
-        summary.get("msg_type") == "NOISE" or summary.get("committed", 0) + summary.get("flagged", 0) == 0,
+        summary.get("msg_type") == "NOISE"
+        or summary.get("committed", 0) + summary.get("flagged", 0) == 0,
         _elapsed,
         raw_text[:60],
     )
@@ -251,14 +250,18 @@ def process_raw_text(
                 q["original_wa_message_id"] = (
                     q.get("original_wa_message_id") or wa_message_id
                 )
-            log.info("[HITL-NOTIFY] Sending %d HITL question(s) to WA group", len(questions))
+            log.info(
+                "[HITL-NOTIFY] Sending %d HITL question(s) to WA group", len(questions)
+            )
             notify_hitl_questions(questions, group_jid, DB_PATH)
         except Exception as _exc:
             log.warning("WA HITL notification failed: %s", _exc)
 
     # Summary request: generate and post shift summary to WA group
     if level2_msg.get("candidate_msg_type") == "SUMMARY_REQUEST" and group_jid:
-        log.info("[SUMMARY] On-demand summary requested by %s — posting to WA", sender_name)
+        log.info(
+            "[SUMMARY] On-demand summary requested by %s — posting to WA", sender_name
+        )
         try:
             from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group
 
@@ -270,7 +273,7 @@ def process_raw_text(
 
     audit(
         {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": now_ist().isoformat(),
             "msg_id": msg_id,
             "wa_message_id": wa_message_id,
             "sender": sender_name,
