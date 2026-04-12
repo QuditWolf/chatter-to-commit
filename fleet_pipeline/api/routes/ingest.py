@@ -191,6 +191,7 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
             raw_text=req.raw_text,
             timestamp_iso=req.received_at,
             group_jid=req.group_jid,
+            is_reply=bool(req.quoted_wa_message_id),
         )
         return {"queued": True, "wa_message_id": req.wa_message_id, "source": "control"}
 
@@ -229,10 +230,15 @@ async def _handle_control_message(
     raw_text: str,
     timestamp_iso: str,
     group_jid: str,
+    is_reply: bool = False,
 ) -> None:
     """
     Handle a message from the control group (not a HITL reply).
     Handles: shift start/end with site extraction, and summary requests.
+
+    is_reply=True means the message was a quoted reply to another message.
+    Shift signals are only processed from plain (non-reply) messages to avoid
+    accidental shift-end from HITL answers like "loading over" or "ALL trucks LEFT".
     """
     import re
     import sqlite3
@@ -244,8 +250,15 @@ async def _handle_control_message(
 
     text = raw_text.strip()
 
-    # ── Shift signal (start/end) ──────────────────────────────────────────────
-    signal = detect_shift_signal(text)
+    # Guard: never treat bot-generated summary messages as new triggers.
+    # (The WA listener already filters fromMe=true, but double-guard here.)
+    if text.startswith("\u2500\u2500") or text.startswith("--"):
+        return
+
+    # ── Shift signal (start/end) — only from plain messages, not replies ──────
+    # Replies (quoted messages) are HITL answers; they must not accidentally
+    # end the shift via phrases like "Loading Over" or "ALL trucks LEFT".
+    signal = detect_shift_signal(text) if not is_reply else None
     if signal in ("start", "end"):
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -279,11 +292,13 @@ async def _handle_control_message(
         return
 
     # ── Summary request ───────────────────────────────────────────────────────
+    # Note: bare "total" or "count" removed to avoid triggering on bot's own
+    # summary messages (which contain "Total Trolleys Loaded = N").
     _SUMMARY_RE = [
         re.compile(r"\b(summary|sumary|summery)\b", re.I),
-        re.compile(r"\b(total|count)\b", re.I),
         re.compile(r"\bsend\s+(report|summary)\b", re.I),
         re.compile(r"\b(report|give|send)\s+(me\s+)?(the\s+)?(total|count|summary)\b", re.I),
+        re.compile(r"\bhow\s+many\b", re.I),
     ]
     for pat in _SUMMARY_RE:
         if pat.search(text):

@@ -48,17 +48,17 @@ def fleet_kpis():
         return _kpi_cache["data"]
 
     with db_conn(DB_PATH) as conn:
-        kpis = get_fleet_kpis(conn)
-        site_summary = get_site_load_summary(conn)
-        # Shift summary from active shift
         active_shift = conn.execute(
             "SELECT * FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
         shift_data = dict(active_shift) if active_shift else None
+        shift_id = shift_data["shift_id"] if shift_data else None
+        kpis = get_fleet_kpis(conn, shift_id=shift_id)
+        site_summary = get_site_load_summary(conn, shift_id=shift_id)
         if shift_data:
             shift_data["event_count"] = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE shift_id=? AND commit_status='COMMITTED'",
-                (shift_data["shift_id"],),
+                "SELECT COUNT(*) FROM events WHERE shift_id=? AND commit_status IN ('COMMITTED','FLAGGED')",
+                (shift_id,),
             ).fetchone()[0]
 
     result = {

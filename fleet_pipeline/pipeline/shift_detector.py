@@ -6,19 +6,23 @@ Rules:
    The date is taken from the message that *starts* the shift, so a shift that
    crosses midnight is named after the day it began.
 
-2. Auto-detection — inactivity gap:
-   If the gap between the current message's timestamp and the previous message's
-   timestamp is ≥ INACTIVITY_GAP (1 hour), the current message starts a new shift.
+2. Shifts start only via explicit WA signals from the control group:
+   - "shift start", "s1/s2/s3", "shift 1/2/3"
+   - Mobilisation messages: "tracking volunteers please reach X and Y"
+   - If no shift exists at all, the first fleet message still auto-starts one
+     as a fallback (method="auto_start").
 
-3. WA signal override:
-   "shift start", "s1/s2/s3", "shift 1/2/3" → force-start a new shift.
-   "shift end/over/done" → force-end the current shift.
+3. Shifts end via explicit WA signals (from the control group, non-reply):
+   - "shift end/over/done"
+   - Standalone "Loading Over" (exact message, no truck mention, not a reply)
+   - "ALL trucks LEFT" / "ALL trolleys LEFT" (not a reply)
+   - Auto-end after AUTO_END_GAP (3h) inactivity — background task in main.py
 
-4. No active shift → first message always starts one.
+4. Inactivity gap no longer auto-starts a new shift (removed). It only auto-ends.
 
 5. Shifts never auto-close on a timer; they close only when:
-   - A WA end signal arrives
-   - The next shift starts (inactivity gap or WA start signal)
+   - A WA end signal arrives (control group)
+   - The background task detects AUTO_END_GAP inactivity
    - Operator presses End / Start
 
 Operator API helpers (module-level, no singleton state needed):
@@ -34,7 +38,7 @@ from typing import Optional
 from uuid import uuid4
 import re
 
-INACTIVITY_GAP = 10800  # seconds — 3 hours (auto-starts a new shift on next message)
+INACTIVITY_GAP = 10800  # seconds — 3 hours (kept for reference; no longer auto-starts shifts)
 AUTO_END_GAP   = 10800  # seconds — 3 hours (background task closes shift with no activity)
 
 
@@ -44,11 +48,16 @@ _SHIFT_START_RE = [
     re.compile(r"\bshift\s+(start|started|begin|begins|shuru)\b", re.I),
     re.compile(r"\bs([123])\b", re.I),
     re.compile(r"\bshift\s+([123])\b", re.I),
+    # Mobilisation messages: "tracking volunteers please reach X and Y"
+    re.compile(r"\btracking\s+volunteers?\b", re.I),
+    re.compile(r"\bvolunteers?\b.*\breach\b", re.I),
 ]
 _SHIFT_END_RE = [
     re.compile(r"\bshift\s+(end|over|ended|finish|done|khatam)\b", re.I),
-    # Standalone "Loading Over" message signals end of loading session → end shift
+    # Standalone "Loading Over" (no truck mention, not a reply) → end shift
     re.compile(r"^\s*loading\s+over\s*$", re.I),
+    # "ALL trucks LEFT" / "ALL trolleys LEFT" → all vehicles have departed → end shift
+    re.compile(r"\ball\s+(trucks?|trolleys?)\s+left\b", re.I),
 ]
 
 
@@ -101,12 +110,9 @@ class ShiftDetector:
             self._last_ts = ts
             return None
 
-        # 2. Inactivity gap → new shift
-        if self._last_ts and (ts - self._last_ts).total_seconds() >= INACTIVITY_GAP:
-            self._start_new(ts, method="inactivity_gap")
-
-        # 3. No shift at all → start one
-        elif not self._active:
+        # 2. No shift at all → start one (inactivity gap no longer auto-starts a shift;
+        #    shifts start only via explicit WA signals or operator action)
+        if not self._active:
             self._start_new(ts, method="auto_start", raw_text=raw_text)
 
         self._last_ts = ts

@@ -228,7 +228,13 @@ def notify_hitl_questions(
 def send_summary_to_group(group_jid: str, db_path: str) -> None:
     """
     Generate the current shift summary and post it to the control group.
-    Uses the same format as the frontend's copyable summary (emoji-free).
+    Format:
+      ── 2026-04-12_06 summary ──
+      Total Trolleys Loaded (all sites) = N
+        Trolleys Loaded @SITE = N
+      Trolleys Reached = N
+      Trolleys UNLOADED = N
+      Trolleys in Loading = N  (aliases)
     Always sends to WA_CONTROL_GROUP_JID if configured.
     """
     group_jid = _resolve_group_jid(group_jid)
@@ -236,14 +242,11 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
         return
 
     import sqlite3
-    import urllib.request
 
-    # Generate summary text using the same logic as the analytics endpoint
     try:
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
 
-            # Find active shift
             shift = conn.execute(
                 """SELECT shift_id, shift_number, shift_name
                    FROM shifts WHERE ended_at IS NULL
@@ -251,86 +254,81 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
             ).fetchone()
 
             if not shift:
-                text = "No active shift found."
+                text = "No active shift."
             else:
-                shift_id = shift["shift_id"]
-                shift_num = shift["shift_number"]
+                shift_id   = shift["shift_id"]
+                shift_name = shift["shift_name"]
 
-                # Aggregate by site
+                # Loaded per site
                 loaded_by_site = conn.execute(
-                    """SELECT e.site_alias, COUNT(*) as cnt
+                    """SELECT COALESCE(e.site_alias, s.display_name, e.site_id, '?') AS site_label,
+                              COUNT(*) AS cnt
                        FROM events e
-                       WHERE e.shift_id=? AND e.status='LO' AND e.commit_status IN ('COMMITTED','FLAGGED')
+                       LEFT JOIN sites s ON s.site_id = e.site_id
+                       WHERE e.shift_id=? AND e.status='LO'
+                         AND e.commit_status IN ('COMMITTED','FLAGGED')
                        GROUP BY e.site_id ORDER BY cnt DESC""",
                     (shift_id,),
                 ).fetchall()
-
-                reached_by_site = conn.execute(
-                    """SELECT e.site_alias, COUNT(*) as cnt
-                       FROM events e
-                       WHERE e.shift_id=? AND e.status='ENTER' AND e.commit_status IN ('COMMITTED','FLAGGED')
-                         AND EXISTS (SELECT 1 FROM sites s WHERE s.site_id=e.site_id AND s.site_type='unloading')
-                       GROUP BY e.site_id ORDER BY cnt DESC""",
-                    (shift_id,),
-                ).fetchall()
-
-                unloaded_by_site = conn.execute(
-                    """SELECT e.site_alias, COUNT(*) as cnt
-                       FROM events e
-                       WHERE e.shift_id=? AND e.status='UO' AND e.commit_status IN ('COMMITTED','FLAGGED')
-                       GROUP BY e.site_id ORDER BY cnt DESC""",
-                    (shift_id,),
-                ).fetchall()
-
-                # Per-truck cycle counts
-                truck_lo = conn.execute(
-                    """SELECT e.truck_alias, COUNT(*) as cnt
-                       FROM events e
-                       WHERE e.shift_id=? AND e.status='LO' AND e.commit_status IN ('COMMITTED','FLAGGED')
-                       GROUP BY e.truck_id ORDER BY e.truck_alias""",
-                    (shift_id,),
-                ).fetchall()
-
-                truck_uo = conn.execute(
-                    """SELECT e.truck_alias, COUNT(*) as cnt
-                       FROM events e
-                       WHERE e.shift_id=? AND e.status='UO' AND e.commit_status IN ('COMMITTED','FLAGGED')
-                       GROUP BY e.truck_id ORDER BY e.truck_alias""",
-                    (shift_id,),
-                ).fetchall()
-
                 total_loaded = sum(r["cnt"] for r in loaded_by_site)
-                total_unloaded = sum(r["cnt"] for r in unloaded_by_site)
 
-                # Build text summary
-                lines = [f"-- Shift {shift_num} summary --"]
+                # Reached unloading sites (ENTER at an unloading-type site)
+                reached_row = conn.execute(
+                    """SELECT COUNT(*) AS cnt
+                       FROM events e
+                       JOIN sites s ON s.site_id = e.site_id
+                       WHERE e.shift_id=? AND e.status='ENTER'
+                         AND s.site_type='unloading'
+                         AND e.commit_status IN ('COMMITTED','FLAGGED')""",
+                    (shift_id,),
+                ).fetchone()
+                total_reached = reached_row["cnt"] if reached_row else 0
+
+                # Unloaded
+                unloaded_row = conn.execute(
+                    """SELECT COUNT(*) AS cnt FROM events
+                       WHERE shift_id=? AND status='UO'
+                         AND commit_status IN ('COMMITTED','FLAGGED')""",
+                    (shift_id,),
+                ).fetchone()
+                total_unloaded = unloaded_row["cnt"] if unloaded_row else 0
+
+                # Trucks currently in open loading cycle (LS with no subsequent LO/LEFT)
+                in_loading_rows = conn.execute(
+                    """SELECT e.truck_alias, e.truck_id,
+                              MAX(e.timestamp_effective) AS last_ls
+                       FROM events e
+                       WHERE e.shift_id=? AND e.status='LS'
+                         AND e.commit_status IN ('COMMITTED','FLAGGED')
+                         AND NOT EXISTS (
+                           SELECT 1 FROM events e2
+                           WHERE e2.truck_id = e.truck_id
+                             AND e2.shift_id = ?
+                             AND e2.status IN ('LO','LEFT')
+                             AND e2.timestamp_effective >= e.timestamp_effective
+                             AND e2.commit_status IN ('COMMITTED','FLAGGED')
+                         )
+                       GROUP BY e.truck_id
+                       ORDER BY e.truck_alias""",
+                    (shift_id, shift_id),
+                ).fetchall()
+                in_loading_aliases = [
+                    r["truck_alias"] or r["truck_id"] for r in in_loading_rows
+                ]
+                in_loading_count = len(in_loading_aliases)
+
+                # Build summary text
+                lines = [f"\u2500\u2500 {shift_name} summary \u2500\u2500"]
                 lines.append(f"Total Trolleys Loaded (all sites) = {total_loaded}")
                 for r in loaded_by_site:
-                    lines.append(
-                        f"  Trolleys Loaded @{r['site_alias'] or '?'} = {r['cnt']}"
-                    )
-                lines.append("")
-                lines.append(f"Total Trolleys Unloaded (all sites) = {total_unloaded}")
-                for r in unloaded_by_site:
-                    lines.append(
-                        f"  Trolleys Unloaded @{r['site_alias'] or '?'} = {r['cnt']}"
-                    )
-
-                # Per-truck cycles
-                if truck_lo or truck_uo:
-                    lines.append("")
-                    lines.append("Per-truck cycles:")
-                    all_trucks = {}
-                    for r in truck_lo:
-                        all_trucks[r["truck_alias"]] = (
-                            all_trucks.get(r["truck_alias"], 0) + r["cnt"]
-                        )
-                    for r in truck_uo:
-                        all_trucks[r["truck_alias"]] = (
-                            all_trucks.get(r["truck_alias"], 0) + r["cnt"]
-                        )
-                    cycle_parts = [f"{t}: {c}" for t, c in sorted(all_trucks.items())]
-                    lines.append("  " + " | ".join(cycle_parts))
+                    lines.append(f"  Trolleys Loaded @{r['site_label']} = {r['cnt']}")
+                lines.append(f"Trolleys Reached = {total_reached}")
+                lines.append(f"Trolleys UNLOADED = {total_unloaded}")
+                if in_loading_count > 0:
+                    aliases_str = ", ".join(in_loading_aliases)
+                    lines.append(f"Trolleys in Loading = {in_loading_count}  ({aliases_str})")
+                else:
+                    lines.append("Trolleys in Loading = 0")
 
                 text = "\n".join(lines)
 
@@ -338,7 +336,6 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
         text = f"Error generating summary: {str(exc)[:100]}"
         log.warning("send_summary_to_group: error generating summary: %s", exc)
 
-    # Post to WA group (plain message, no quote)
     _post_send_message(group_jid, text)
     log.info("wa_notifier: posted shift summary to group %s", group_jid)
 

@@ -686,8 +686,8 @@ def get_messages_page(
     }
 
 
-def get_fleet_kpis(conn: sqlite3.Connection) -> Dict[str, Any]:
-    """KPI summary: in loading, unloading, transit counts + loaded today."""
+def get_fleet_kpis(conn: sqlite3.Connection, shift_id: Optional[str] = None) -> Dict[str, Any]:
+    """KPI summary: in loading, unloading, transit counts + loaded in current shift."""
     fleet = get_fleet_state(conn)
     in_loading = [
         t
@@ -701,20 +701,27 @@ def get_fleet_kpis(conn: sqlite3.Connection) -> Dict[str, Any]:
     ]
     in_transit = [t for t in fleet if t.get("status") == "LEFT"]
 
-    from datetime import datetime, timezone
-
-    today_start = (
-        datetime.now(timezone.utc)
-        .replace(hour=0, minute=0, second=0, microsecond=0)
-        .isoformat()
-    )
-    loaded_today_rows = conn.execute(
-        """SELECT DISTINCT truck_id FROM events
-           WHERE commit_status='COMMITTED' AND status='LO'
-             AND timestamp_effective >= ?""",
-        (today_start,),
-    ).fetchall()
-    loaded_today = [r[0] for r in loaded_today_rows]
+    if shift_id:
+        loaded_rows = conn.execute(
+            """SELECT DISTINCT truck_id FROM events
+               WHERE commit_status IN ('COMMITTED','FLAGGED') AND status='LO'
+                 AND shift_id=?""",
+            (shift_id,),
+        ).fetchall()
+    else:
+        from datetime import datetime, timezone
+        today_start = (
+            datetime.now(timezone.utc)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .isoformat()
+        )
+        loaded_rows = conn.execute(
+            """SELECT DISTINCT truck_id FROM events
+               WHERE commit_status IN ('COMMITTED','FLAGGED') AND status='LO'
+                 AND timestamp_effective >= ?""",
+            (today_start,),
+        ).fetchall()
+    loaded_in_shift = [r[0] for r in loaded_rows]
 
     return {
         "in_loading": {
@@ -730,8 +737,8 @@ def get_fleet_kpis(conn: sqlite3.Connection) -> Dict[str, Any]:
             "trucks": [t.get("truck_id") for t in in_transit],
         },
         "loaded_today": {
-            "count": len(loaded_today),
-            "trucks": loaded_today,
+            "count": len(loaded_in_shift),
+            "trucks": loaded_in_shift,
         },
     }
 
@@ -745,25 +752,38 @@ def _is_loading_site(conn: sqlite3.Connection, site_id: Optional[str]) -> bool:
     return row and row[0] == "loading"
 
 
-def get_site_load_summary(conn: sqlite3.Connection) -> List[Dict]:
-    """Per-site count of trolleys that completed a load (LO) and left today."""
-    from datetime import datetime, timezone
-
-    today_start = (
-        datetime.now(timezone.utc)
-        .replace(hour=0, minute=0, second=0, microsecond=0)
-        .isoformat()
-    )
-    rows = conn.execute(
-        """SELECT s.display_name as site_name, e.site_id, COUNT(DISTINCT e.truck_id) as count
-           FROM events e
-           JOIN sites s ON e.site_id = s.site_id
-           WHERE e.commit_status='COMMITTED' AND e.status='LO'
-             AND e.timestamp_effective >= ?
-           GROUP BY e.site_id
-           ORDER BY count DESC""",
-        (today_start,),
-    ).fetchall()
+def get_site_load_summary(conn: sqlite3.Connection, shift_id: Optional[str] = None) -> List[Dict]:
+    """Per-site count of trolleys that completed a load (LO) in the current shift (or today)."""
+    if shift_id:
+        rows = conn.execute(
+            """SELECT s.display_name as site_name, e.site_id,
+                      COUNT(DISTINCT e.truck_id) as count
+               FROM events e
+               JOIN sites s ON e.site_id = s.site_id
+               WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='LO'
+                 AND e.shift_id=?
+               GROUP BY e.site_id
+               ORDER BY count DESC""",
+            (shift_id,),
+        ).fetchall()
+    else:
+        from datetime import datetime, timezone
+        today_start = (
+            datetime.now(timezone.utc)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .isoformat()
+        )
+        rows = conn.execute(
+            """SELECT s.display_name as site_name, e.site_id,
+                      COUNT(DISTINCT e.truck_id) as count
+               FROM events e
+               JOIN sites s ON e.site_id = s.site_id
+               WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='LO'
+                 AND e.timestamp_effective >= ?
+               GROUP BY e.site_id
+               ORDER BY count DESC""",
+            (today_start,),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
