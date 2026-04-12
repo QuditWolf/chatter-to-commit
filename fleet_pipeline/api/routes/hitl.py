@@ -79,7 +79,7 @@ def _extract_code_from_answer(s: str) -> Optional[str]:
 
 
 class AnswerRequest(BaseModel):
-    question_id: str
+    question_id: Optional[str] = None
     answer: str
     answered_by: Optional[str] = "human"
 
@@ -123,6 +123,8 @@ async def submit_answer(req: AnswerRequest, background_tasks: BackgroundTasks):
     Everything else (natural language, corrections, full sentences) →
       re-process original message through LLM with answer as operator_clarification.
     """
+    if not req.question_id:
+        raise HTTPException(status_code=422, detail="question_id is required")
     with db.db_conn(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT * FROM hitl_queue WHERE question_id=?", (req.question_id,)

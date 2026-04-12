@@ -60,7 +60,9 @@ def _setup_file_logging() -> None:
         )
     )
     # Root logger catches fleet_pipeline.* and anything else not listed below
-    logging.getLogger().addHandler(handler)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
     # Uvicorn writes access + error logs through these named loggers
     for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
         logging.getLogger(name).addHandler(handler)
