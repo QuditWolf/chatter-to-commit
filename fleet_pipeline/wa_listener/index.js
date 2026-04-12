@@ -103,6 +103,28 @@ function postToAPI(endpoint, body) {
   });
 }
 
+// ── Bot-sent message ID tracking ──────────────────────────────────────────────
+// When the Python API sends a message via /send-reply or /send-message, we store
+// the returned bot_message_id here. When Baileys echoes that message back to us
+// (fromMe=true), we skip it — it's our own send, not a human typing.
+// IDs expire after 2 hours to prevent memory growth.
+
+const _botSentIds = new Map(); // id → timestamp
+const BOT_SENT_TTL = 2 * 60 * 60 * 1000; // 2 hours
+
+function trackBotSentId(id) {
+  if (!id) return;
+  _botSentIds.set(id, Date.now());
+  // Lazy cleanup: remove entries older than TTL
+  for (const [k, ts] of _botSentIds) {
+    if (Date.now() - ts > BOT_SENT_TTL) _botSentIds.delete(k);
+  }
+}
+
+function isBotSentId(id) {
+  return _botSentIds.has(id);
+}
+
 // ── Active socket (set on each successful connect) ────────────────────────────
 
 let isConnected = false;
@@ -142,6 +164,8 @@ const healthServer = http.createServer((req, res) => {
           sent = await activeSock.sendMessage(group_jid, { text });
         }
         const botMsgId = sent?.key?.id || null;
+        trackBotSentId(botMsgId);
+        console.log(`[Fleet WA Listener] [SENT] /send-reply → ${group_jid}: ${text.slice(0, 80).replace(/\n/g, " ")}`);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ sent: true, bot_message_id: botMsgId }));
       } catch (err) {
@@ -167,6 +191,8 @@ const healthServer = http.createServer((req, res) => {
         }
         const sent = await activeSock.sendMessage(group_jid, { text });
         const botMsgId = sent?.key?.id || null;
+        trackBotSentId(botMsgId);
+        console.log(`[Fleet WA Listener] [SENT] /send-message → ${group_jid}: ${text.slice(0, 80).replace(/\n/g, " ")}`);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ sent: true, bot_message_id: botMsgId }));
       } catch (err) {
@@ -343,6 +369,32 @@ async function startListener() {
         }
       });
 
+      sock.ev.on("messages.update", (updates) => {
+        for (const update of updates) {
+          // Recalled/deleted message: update.update.message is null
+          if (!update.update || update.update.message !== null) continue;
+          const jid = update.key?.remoteJid || "";
+          if (!jid.endsWith("@g.us")) continue;
+          const knownGroups = [GROUP_JID, CONTROL_GROUP_JID].filter(Boolean);
+          if (knownGroups.length > 0 && !knownGroups.includes(jid)) continue;
+
+          const wa_message_id = update.key.id;
+          const deleted_by = update.key.participant || jid;
+          console.log(`[Fleet WA Listener] [DELETE] Message recalled: ${wa_message_id} by ${deleted_by}`);
+
+          postToAPI("/api/ingest/wa-message-deleted", {
+            wa_message_id,
+            group_jid: jid,
+            deleted_by,
+          }).then(r => {
+            if (r.status >= 200 && r.status < 300) {
+              const parsed = (() => { try { return JSON.parse(r.body); } catch { return {}; } })();
+              console.log(`[Fleet WA Listener] [DELETE] Marked ${parsed.events_deleted || 0} event(s) as deleted`);
+            }
+          });
+        }
+      });
+
       sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (type !== "notify") return;
 
@@ -354,8 +406,13 @@ async function startListener() {
           const knownGroups = [GROUP_JID, CONTROL_GROUP_JID].filter(Boolean);
           if (knownGroups.length > 0 && !knownGroups.includes(jid)) continue;
 
-          // Skip messages sent by our own bot account
-          if (msg.key.fromMe) continue;
+          // For the fleet group: always skip fromMe (bot never needs to read its own echoes there).
+          // For the control group: allow fromMe unless it's a message we sent (tracked in _botSentIds).
+          // This lets the operator send "summary" from the same phone the bot runs on.
+          if (msg.key.fromMe) {
+            const isControl = CONTROL_GROUP_JID && jid === CONTROL_GROUP_JID;
+            if (!isControl || isBotSentId(msg.key.id)) continue;
+          }
 
           const text = (
             msg.message?.conversation ||

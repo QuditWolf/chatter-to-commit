@@ -31,6 +31,7 @@ from fleet_pipeline.pipeline.registries import (
     build_vocab_from_db,
 )
 from fleet_pipeline.pipeline.shift_detector import ShiftDetector
+from fleet_pipeline.utils import to_ist
 
 _lock = threading.Lock()
 _processor: Optional[Level3Processor] = None
@@ -88,6 +89,8 @@ def process_raw_text(
     quoted_wa_message_id: WA message ID this message is replying to (for reply-to-context).
     """
     _t_start = time.monotonic()
+    _ts_ist = to_ist(timestamp_iso) if timestamp_iso else "?"
+    log.info("[RECV] %s | from=%s | ts=%s | %r", source, sender_name, _ts_ist, raw_text[:100])
 
     if timestamp_iso is None:
         timestamp_iso = (
@@ -135,6 +138,7 @@ def process_raw_text(
     l3_prompt = None
     l3_raw_output = None
     processor = _get_processor()
+    log.info("[L3] Calling LLM for msg %s (%s)…", msg_id[:8], source)
     try:
         result = processor.process_message(
             level2_msg,
@@ -146,6 +150,12 @@ def process_raw_text(
         # Pop audit fields before passing result to committer
         l3_prompt = result.pop("_l3_prompt", None)
         l3_raw_output = result.pop("_l3_raw_output", None)
+        log.info(
+            "[L3] Result: msg_type=%s events=%d conf=%.2f",
+            result.get("msg_type", "?"),
+            len(result.get("events") or []),
+            result.get("overall_confidence", 0),
+        )
     except Exception as exc:
         llm_error = f"{type(exc).__name__}: {str(exc)[:200]}"
         log.warning("L3 inference failed for msg %s: %s", msg_id, llm_error)
@@ -209,6 +219,18 @@ def process_raw_text(
         summary["llm_error"] = llm_error
         summary["unmapped"] = True
 
+    _elapsed = time.monotonic() - _t_start
+    log.info(
+        "[DONE] msg=%s committed=%d flagged=%d hitl=%d noise=%s elapsed=%.1fs | %r",
+        msg_id[:8],
+        summary.get("committed", 0),
+        summary.get("flagged", 0),
+        summary.get("hitl_created", 0),
+        summary.get("msg_type") == "NOISE" or summary.get("committed", 0) + summary.get("flagged", 0) == 0,
+        _elapsed,
+        raw_text[:60],
+    )
+
     # WA HITL notifications: if questions were created and we know the group, send bot replies
     if summary.get("hitl_created", 0) > 0 and group_jid:
         try:
@@ -229,12 +251,14 @@ def process_raw_text(
                 q["original_wa_message_id"] = (
                     q.get("original_wa_message_id") or wa_message_id
                 )
+            log.info("[HITL-NOTIFY] Sending %d HITL question(s) to WA group", len(questions))
             notify_hitl_questions(questions, group_jid, DB_PATH)
         except Exception as _exc:
             log.warning("WA HITL notification failed: %s", _exc)
 
     # Summary request: generate and post shift summary to WA group
     if level2_msg.get("candidate_msg_type") == "SUMMARY_REQUEST" and group_jid:
+        log.info("[SUMMARY] On-demand summary requested by %s — posting to WA", sender_name)
         try:
             from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group
 

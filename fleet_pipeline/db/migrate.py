@@ -48,6 +48,7 @@ def run_migrations(db_path: str = DB_PATH) -> None:
         print("\n[shifts] Adding new columns...")
         _add_column(conn, "shifts", "shift_name", "TEXT")
         _add_column(conn, "shifts", "default_site_id", "TEXT")
+        _add_column(conn, "shifts", "default_site_ids", "TEXT")
 
         print("\n[hitl_queue] Adding new columns...")
         _add_column(conn, "hitl_queue", "wa_message_id", "TEXT")

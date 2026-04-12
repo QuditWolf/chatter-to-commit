@@ -31,12 +31,15 @@ Operator API helpers (module-level, no singleton state needed):
    operator_resume(db_path)  → reopen the most recently ended shift
 """
 import json
+import logging
 import sqlite3
 import warnings
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 from uuid import uuid4
 import re
+
+log = logging.getLogger(__name__)
 
 INACTIVITY_GAP = 10800  # seconds — 3 hours (kept for reference; no longer auto-starts shifts)
 AUTO_END_GAP   = 10800  # seconds — 3 hours (background task closes shift with no activity)
@@ -174,17 +177,23 @@ class ShiftDetector:
         # Recount after potential _end() above
         day_num = self._day_count(ts) + 1
 
-        # Extract default site from shift start message (e.g. "shift start KN4")
-        default_site_id = _extract_site_from_text(self.conn, raw_text) if raw_text else None
+        # Extract default site(s) from shift start message (e.g. "shift start KN4" or "volunteers reach KN4 and SOC")
+        default_site_ids = _extract_sites_from_text(self.conn, raw_text) if raw_text else []
+        default_site_id = default_site_ids[0] if default_site_ids else None
+        default_site_ids_json = json.dumps(default_site_ids) if default_site_ids else None
 
         try:
             self.conn.execute(
                 """INSERT INTO shifts
                    (shift_id, shift_number, shift_name, started_at, detection_method,
-                    simulation_run_id, default_site_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    simulation_run_id, default_site_id, default_site_ids)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (shift_id, day_num, shift_name, ts.isoformat(), method,
-                 self.simulation_run_id, default_site_id),
+                 self.simulation_run_id, default_site_id, default_site_ids_json),
+            )
+            log.info(
+                "[SHIFT] Started: %s (method=%s default_sites=%s)",
+                shift_name, method, default_site_ids or "none",
             )
             self._active = {
                 "shift_id": shift_id,
@@ -193,6 +202,7 @@ class ShiftDetector:
                 "started_at": ts.isoformat(),
                 "ended_at": None,
                 "default_site_id": default_site_id,
+                "default_site_ids": default_site_ids_json,
             }
         except Exception as e:
             warnings.warn(f"[ShiftDetector] Failed to create shift: {e}")
@@ -200,11 +210,13 @@ class ShiftDetector:
     def _end(self, ts: datetime):
         if not self._active:
             return
+        shift_name = self._active.get("shift_name", self._active.get("shift_id", "?"))
         try:
             self.conn.execute(
                 "UPDATE shifts SET ended_at=? WHERE shift_id=?",
                 (ts.isoformat(), self._active["shift_id"]),
             )
+            log.info("[SHIFT] Ended: %s", shift_name)
         except Exception as e:
             warnings.warn(f"[ShiftDetector] Failed to end shift: {e}")
         self._active = None
@@ -282,29 +294,48 @@ def operator_resume(db_path: str) -> Optional[dict]:
 def _extract_site_from_text(conn: sqlite3.Connection, text: str) -> Optional[str]:
     """
     Scan text for a word that matches a known site alias or site_id.
-    Returns the canonical site_id, or None if no match.
+    Returns the canonical site_id of the first match, or None if no match.
     Used to extract the default site from shift-start messages like "shift start KN4".
     """
+    sites = _extract_sites_from_text(conn, text)
+    return sites[0] if sites else None
+
+
+def _extract_sites_from_text(conn: sqlite3.Connection, text: str) -> List[str]:
+    """
+    Scan text for ALL words that match known site aliases or site_ids.
+    Returns list of canonical site_ids (deduplicated, in order of appearance).
+    Used to extract default sites from shift-start messages like "tracking volunteers reach KN4 and SOC".
+    """
     if not text:
-        return None
+        return []
     try:
         rows = conn.execute("SELECT site_id, aliases FROM sites WHERE is_active=1").fetchall()
     except Exception:
-        return None
+        return []
 
+    found: list = []
+    seen: set = set()
     words = re.findall(r"[A-Za-z0-9]{2,8}", text)
     for word in words:
         wl = word.lower()
         for row in rows:
-            if wl == row[0].lower():
-                return row[0]
+            site_id = row[0]
+            if site_id in seen:
+                continue
+            if wl == site_id.lower():
+                found.append(site_id)
+                seen.add(site_id)
+                break
             try:
                 aliases = json.loads(row[1] or "[]")
             except Exception:
                 aliases = []
             if wl in [a.lower() for a in aliases]:
-                return row[0]
-    return None
+                found.append(site_id)
+                seen.add(site_id)
+                break
+    return found
 
 
 def _parse_iso(ts: str) -> Optional[datetime]:

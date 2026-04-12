@@ -91,6 +91,42 @@ def create_truck(
     )
 
 
+def auto_create_truck(conn: sqlite3.Connection, truck_alias: str) -> Optional[str]:
+    """
+    Auto-create a truck from an alias when the LLM identifies a truck not in registry.
+    Returns the new truck_id, or None if alias is empty/already exists.
+    """
+    import re as _re
+    if not truck_alias or not truck_alias.strip():
+        return None
+
+    # Generate a stable truck_id from the alias
+    truck_id = _re.sub(r"[^A-Za-z0-9_]", "_", truck_alias.strip()).upper()[:20].strip("_")
+    if not truck_id:
+        return None
+
+    # If already exists (may have been created in a previous run), return it
+    existing = conn.execute(
+        "SELECT truck_id FROM trucks WHERE truck_id=?", (truck_id,)
+    ).fetchone()
+    if existing:
+        # Also check if alias already points to an existing truck
+        return truck_id
+
+    # Check alias collision
+    for row in conn.execute("SELECT truck_id, aliases FROM trucks").fetchall():
+        try:
+            aliases = json.loads(row["aliases"] or "[]")
+        except Exception:
+            aliases = []
+        if truck_alias.lower() in [a.lower() for a in aliases] or truck_alias.lower() == row["truck_id"].lower():
+            # Already exists under a different ID — don't create duplicate
+            return None
+
+    create_truck(conn, truck_id, truck_alias.strip(), [truck_alias.strip()])
+    return truck_id
+
+
 # ---------------------------------------------------------------------------
 # Sites
 # ---------------------------------------------------------------------------
@@ -227,17 +263,17 @@ def get_committed_events(conn: sqlite3.Connection, limit: int = 50) -> List[Dict
 
 
 def get_fleet_state(conn: sqlite3.Connection) -> List[Dict]:
-    """Latest committed event per truck."""
+    """Latest committed/flagged event per truck (fleet live state)."""
     rows = conn.execute(
         """SELECT e.*, t.display_name as truck_name, s.display_name as site_name
            FROM events e
            LEFT JOIN trucks t ON e.truck_id = t.truck_id
            LEFT JOIN sites s ON e.site_id = s.site_id
-           WHERE e.commit_status = 'COMMITTED'
+           WHERE e.commit_status IN ('COMMITTED', 'FLAGGED')
              AND e.truck_id IS NOT NULL
              AND e.rowid IN (
                SELECT MAX(rowid) FROM events
-               WHERE commit_status='COMMITTED' AND truck_id IS NOT NULL
+               WHERE commit_status IN ('COMMITTED', 'FLAGGED') AND truck_id IS NOT NULL
                GROUP BY truck_id
              )
            ORDER BY e.truck_id"""
@@ -486,6 +522,87 @@ def get_shift_default_site(conn: sqlite3.Connection, shift_id: str) -> Optional[
         "SELECT default_site_id FROM shifts WHERE shift_id=?", (shift_id,)
     ).fetchone()
     return row[0] if row and row[0] else None
+
+
+def get_shift_default_sites(conn: sqlite3.Connection, shift_id: str) -> List[str]:
+    """
+    Return list of default site_ids for a shift (from default_site_ids JSON column).
+    Falls back to [default_site_id] if default_site_ids not set.
+    Returns empty list if no default sites.
+    """
+    row = conn.execute(
+        "SELECT default_site_id, default_site_ids FROM shifts WHERE shift_id=?",
+        (shift_id,),
+    ).fetchone()
+    if not row:
+        return []
+    # Prefer JSON array column
+    if row["default_site_ids"]:
+        try:
+            ids = json.loads(row["default_site_ids"])
+            if isinstance(ids, list) and ids:
+                return ids
+        except Exception:
+            pass
+    # Fall back to single column
+    if row["default_site_id"]:
+        return [row["default_site_id"]]
+    return []
+
+
+def merge_trucks(conn: sqlite3.Connection, src_id: str, dst_id: str) -> dict:
+    """
+    Merge truck src_id into dst_id:
+    - Copy all src aliases into dst aliases (deduplicated)
+    - Reassign all events from src to dst
+    - Deactivate src truck
+    Returns {"merged": True, "aliases_added": [...], "events_reassigned": N}
+    """
+    src = conn.execute(
+        "SELECT * FROM trucks WHERE truck_id=?", (src_id,)
+    ).fetchone()
+    dst = conn.execute(
+        "SELECT * FROM trucks WHERE truck_id=?", (dst_id,)
+    ).fetchone()
+    if not src or not dst:
+        raise ValueError(f"Truck not found: src={src_id!r} dst={dst_id!r}")
+
+    src_aliases = json.loads(src["aliases"] or "[]")
+    dst_aliases = json.loads(dst["aliases"] or "[]")
+
+    # Add src truck_id and its aliases to dst (deduplicated, case-insensitive)
+    dst_lower = {a.lower() for a in dst_aliases}
+    new_aliases = list(dst_aliases)
+    added = []
+    for a in [src_id] + src_aliases:
+        if a.lower() not in dst_lower:
+            new_aliases.append(a)
+            dst_lower.add(a.lower())
+            added.append(a)
+
+    conn.execute(
+        "UPDATE trucks SET aliases=? WHERE truck_id=?",
+        (json.dumps(new_aliases), dst_id),
+    )
+
+    # Reassign all events
+    result = conn.execute(
+        "UPDATE events SET truck_id=? WHERE truck_id=?", (dst_id, src_id)
+    )
+    events_reassigned = result.rowcount
+
+    # Deactivate src truck
+    conn.execute(
+        "UPDATE trucks SET is_active=0 WHERE truck_id=?", (src_id,)
+    )
+
+    return {
+        "merged": True,
+        "src_id": src_id,
+        "dst_id": dst_id,
+        "aliases_added": added,
+        "events_reassigned": events_reassigned,
+    }
 
 
 def get_all_shifts(conn: sqlite3.Connection) -> List[Dict]:

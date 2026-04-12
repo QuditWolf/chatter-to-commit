@@ -46,6 +46,12 @@ class ManualMessageRequest(BaseModel):
     timestamp_iso: Optional[str] = None
 
 
+class WAMessageDeletedRequest(BaseModel):
+    wa_message_id: str
+    group_jid: Optional[str] = None
+    deleted_by: Optional[str] = None
+
+
 async def _broadcast_summary(summary: dict, source: str):
     from fleet_pipeline.api.main import ws_manager
     from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
@@ -307,6 +313,72 @@ async def _handle_control_message(
             except Exception as exc:
                 log.warning("On-demand summary failed: %s", exc)
             return
+
+    # ── MERGE truck command ───────────────────────────────────────────────────
+    # Syntax: MERGE <src_alias_or_id> <dst_alias_or_id>
+    # Merges src truck into dst: copies aliases, reassigns events, deactivates src.
+    _MERGE_RE = re.compile(r"^\s*MERGE\s+(\S+)\s+(\S+)\s*$", re.I)
+    m = _MERGE_RE.match(text)
+    if m:
+        src_raw, dst_raw = m.group(1).strip(), m.group(2).strip()
+        import sqlite3 as _sq
+        try:
+            conn = _sq.connect(DB_PATH)
+            conn.row_factory = _sq.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+
+            # Resolve alias → truck_id
+            def _resolve_truck(alias_or_id: str) -> Optional[str]:
+                row = conn.execute(
+                    "SELECT truck_id FROM trucks WHERE truck_id=? AND is_active=1",
+                    (alias_or_id,),
+                ).fetchone()
+                if row:
+                    return row[0]
+                for r in conn.execute("SELECT truck_id, aliases FROM trucks WHERE is_active=1"):
+                    try:
+                        aliases = __import__("json").loads(r["aliases"] or "[]")
+                    except Exception:
+                        aliases = []
+                    if alias_or_id.lower() in [a.lower() for a in aliases]:
+                        return r["truck_id"]
+                return None
+
+            src_id = _resolve_truck(src_raw)
+            dst_id = _resolve_truck(dst_raw)
+
+            from fleet_pipeline.db import database as _db
+            from fleet_pipeline.pipeline.wa_notifier import _post_send_message, _resolve_group_jid
+
+            if not src_id or not dst_id:
+                missing = src_raw if not src_id else dst_raw
+                notify_jid = _resolve_group_jid(group_jid)
+                if notify_jid:
+                    _post_send_message(notify_jid, f"⚠️ MERGE failed: trolley '{missing}' not found.")
+                conn.close()
+                return
+
+            result = _db.merge_trucks(conn, src_id, dst_id)
+            conn.commit()
+            conn.close()
+
+            log.info("[MERGE] %s → %s: %d events reassigned, aliases added: %s",
+                     src_id, dst_id, result["events_reassigned"], result["aliases_added"])
+
+            notify_jid = _resolve_group_jid(group_jid)
+            if notify_jid:
+                _post_send_message(
+                    notify_jid,
+                    f"✅ Merged *{src_raw}* (ID: {src_id}) into *{dst_raw}* (ID: {dst_id})\n"
+                    f"  Events reassigned: {result['events_reassigned']}\n"
+                    f"  Aliases added: {', '.join(result['aliases_added']) or 'none'}",
+                )
+
+            from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+            invalidate_kpi_cache()
+        except Exception as exc:
+            log.error("MERGE command failed: %s", exc)
+        return
 
 
 async def _handle_wa_hitl_answer(
@@ -611,6 +683,46 @@ async def reprocess_message_by_id(msg_id: str):
 
     asyncio.create_task(_run())
     return {"reprocessed": 1, "message": f"Reprocessing message {msg_id} in background"}
+
+
+@router.post("/wa-message-deleted", status_code=202)
+async def wa_message_deleted(req: WAMessageDeletedRequest):
+    """
+    Called by Node.js when a WA message is recalled/deleted.
+    Marks all events from that wa_message_id as DELETED so they don't affect fleet state.
+    """
+    import sqlite3
+    from fleet_pipeline.config import DB_PATH
+    from fleet_pipeline.api.main import ws_manager
+
+    wa_message_id = req.wa_message_id
+
+    deleted_events = 0
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        result = conn.execute(
+            """UPDATE events SET commit_status='DELETED'
+               WHERE wa_message_id=? AND commit_status IN ('COMMITTED','FLAGGED')""",
+            (wa_message_id,),
+        )
+        deleted_events = result.rowcount
+        conn.execute(
+            "UPDATE raw_messages SET is_deleted=1 WHERE msg_id=?",
+            (wa_message_id,),
+        )
+
+    log.info(
+        "[DELETE] WA message %s recalled — %d event(s) marked DELETED",
+        wa_message_id[:12],
+        deleted_events,
+    )
+
+    if deleted_events > 0:
+        from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
+        invalidate_kpi_cache()
+        await ws_manager.broadcast("fleet_state_updated", {"source": "message_deleted"})
+
+    return {"deleted": True, "wa_message_id": wa_message_id, "events_deleted": deleted_events}
 
 
 @router.get("/status")

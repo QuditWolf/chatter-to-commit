@@ -317,6 +317,18 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
                 ]
                 in_loading_count = len(in_loading_aliases)
 
+                # Load cycles per trolley (LO count per truck in this shift)
+                load_cycles_rows = conn.execute(
+                    """SELECT COALESCE(e.truck_alias, e.truck_id, '?') AS alias,
+                              COUNT(*) AS cnt
+                       FROM events e
+                       WHERE e.shift_id=? AND e.status='LO'
+                         AND e.commit_status IN ('COMMITTED','FLAGGED')
+                       GROUP BY e.truck_id
+                       ORDER BY cnt DESC, alias ASC""",
+                    (shift_id,),
+                ).fetchall()
+
                 # Build summary text
                 lines = [f"\u2500\u2500 {shift_name} summary \u2500\u2500"]
                 lines.append(f"Total Trolleys Loaded (all sites) = {total_loaded}")
@@ -329,6 +341,12 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
                     lines.append(f"Trolleys in Loading = {in_loading_count}  ({aliases_str})")
                 else:
                     lines.append("Trolleys in Loading = 0")
+
+                if load_cycles_rows:
+                    lines.append("")
+                    lines.append("Load cycles per trolley:")
+                    cycle_parts = [f"{r['alias']} = {r['cnt']}" for r in load_cycles_rows]
+                    lines.append("  " + "   ".join(cycle_parts))
 
                 text = "\n".join(lines)
 

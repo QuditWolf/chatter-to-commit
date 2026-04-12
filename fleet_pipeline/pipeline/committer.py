@@ -22,10 +22,14 @@ Duplicate detection (stored as NOISE, excluded from fleet state):
 """
 
 import json
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+log = logging.getLogger(__name__)
+
+from fleet_pipeline.utils import to_ist
 from fleet_pipeline.config import CONFIDENCE_THRESHOLDS, DB_PATH
 from fleet_pipeline.db import database as db
 from fleet_pipeline.pipeline import hitl_queue as hitl
@@ -178,6 +182,12 @@ class Committer:
                 self._handle_correction(conn, level3_result, msg_id, raw_text, summary)
 
             elif msg_type in ("NOISE", "QUERY", "OPS_NOTE", "SHIFT_SIGNAL"):
+                log.info(
+                    "[NOISE] msg_type=%s | %r | reason: %s",
+                    msg_type,
+                    raw_text[:60],
+                    level3_result.get("notes") or f"Classified as {msg_type}",
+                )
                 # Save LLM classification to DB so message map can display it,
                 # but DO NOT affect fleet state (commit_status='NOISE' is excluded
                 # from all fleet state / KPI queries).
@@ -200,6 +210,24 @@ class Committer:
 
             # Deleted messages: original text is unrecoverable — no HITL question created
             # since there is no context for a human to act on.
+
+        # Send WA notifications for auto-created trucks (after DB commit)
+        for new_truck_id, alias in summary.pop("_new_trucks", []):
+            if self.group_jid:
+                try:
+                    from fleet_pipeline.pipeline.wa_notifier import (
+                        _post_send_message, _resolve_group_jid,
+                    )
+                    notify_jid = _resolve_group_jid(self.group_jid)
+                    if notify_jid:
+                        msg = (
+                            f"\u2705 New trolley auto-added: *{alias}* (ID: {new_truck_id})\n"
+                            f"To merge with an existing trolley, reply in this group:\n"
+                            f"`MERGE {alias} <existing_id>`"
+                        )
+                        _post_send_message(notify_jid, msg)
+                except Exception as _exc:
+                    log.warning("Failed to notify new truck creation: %s", _exc)
 
         return summary
 
@@ -305,6 +333,42 @@ class Committer:
         if row and row[0]:
             return (row[0], row[1] or "")
         return None
+
+    def _infer_site_from_any_sender_shift(
+        self, conn, shift_id: Optional[str]
+    ) -> Optional[Tuple[str, str]]:
+        """
+        Find the most recent site used by ANY sender in the current shift.
+        Used as a lower-confidence fallback when the same-sender inference fails.
+        Returns (site_id, site_alias) or None.
+        """
+        if not shift_id:
+            return None
+        row = conn.execute(
+            """SELECT e.site_id, e.site_alias
+               FROM events e
+               WHERE e.shift_id = ?
+                 AND e.site_id IS NOT NULL
+                 AND e.commit_status IN ('COMMITTED', 'FLAGGED')
+               ORDER BY e.timestamp_effective DESC, e.rowid DESC
+               LIMIT 1""",
+            (shift_id,),
+        ).fetchone()
+        if row and row[0]:
+            return (row[0], row[1] or "")
+        return None
+
+    def _auto_create_truck_in_db(self, conn, truck_alias: str) -> Optional[str]:
+        """
+        Auto-create a new truck entry from its alias.
+        Returns new truck_id, or None if creation not possible/appropriate.
+        """
+        if not truck_alias or not truck_alias.strip():
+            return None
+        new_id = db.auto_create_truck(conn, truck_alias)
+        if new_id:
+            log.info("[AUTO-TRUCK] Created new truck: %s (alias=%s)", new_id, truck_alias)
+        return new_id
 
     def _needs_inferred_enter(self, conn, truck_id: str, site_id: str) -> bool:
         """
@@ -548,8 +612,7 @@ class Committer:
                 ev.get("timestamp_effective", ""),
             )
             if dup_reason:
-                import warnings as _w
-                _w.warn(f"[Committer] Duplicate/ordering skip: {dup_reason}")
+                log.info("[DUPLICATE] Skipping %s %s@%s — %s", status, truck_alias or truck_id, site_id, dup_reason)
                 if msg_id:
                     db.insert_event(
                         conn,
@@ -575,48 +638,52 @@ class Committer:
                     )
                 continue
 
-            # Site inference: if site_id is unknown, try same sender's last event in this shift
-            if (
-                ev.get("site_id") is None
-                and ev.get("status", "") in SITE_REQUIRED_STATUSES
-                and self.sender_id
-            ):
-                ev_shift_for_infer = ev.get("shift_id") or resolved_shift_id
-                inferred_site = self._infer_site_from_sender_shift(
-                    conn, self.sender_id, ev_shift_for_infer
-                )
-                if inferred_site:
-                    ev["site_id"] = inferred_site[0]
-                    ev["site_alias"] = inferred_site[1]
-                    ev["inferred"] = True
-                    # Cap confidence to FLAGGED range so it always gets reviewed
-                    ev["confidence"] = min(
-                        ev.get("confidence", overall_confidence), 0.72
-                    )
-                    note = (
-                        f"site inferred from sender history in current shift "
-                        f"({inferred_site[1] or inferred_site[0]})"
-                    )
-                    ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip(
-                        "; "
-                    )
-
-            # Site inference fallback: use shift's default site (announced at shift start)
+            # Site inference — applied only when LLM didn't provide a site.
+            # Priority: same sender same shift → any sender same shift → single default site.
+            # Multiple default sites → UNKNOWN_SITE HITL.
             if ev.get("site_id") is None and ev.get("status", "") in SITE_REQUIRED_STATUSES:
-                ev_shift_for_default = ev.get("shift_id") or resolved_shift_id
-                if ev_shift_for_default:
-                    default_site = db.get_shift_default_site(conn, ev_shift_for_default)
-                    if default_site:
-                        ev["site_id"] = default_site
-                        ev["site_alias"] = ev.get("site_alias") or default_site
+                ev_shift_id = ev.get("shift_id") or resolved_shift_id
+
+                # 1. Same sender, same shift (most reliable)
+                inferred_site = None
+                if self.sender_id and ev_shift_id:
+                    inferred_site = self._infer_site_from_sender_shift(
+                        conn, self.sender_id, ev_shift_id
+                    )
+                    if inferred_site:
+                        ev["site_id"] = inferred_site[0]
+                        ev["site_alias"] = inferred_site[1]
                         ev["inferred"] = True
-                        ev["confidence"] = min(
-                            ev.get("confidence", overall_confidence), 0.88
-                        )
-                        note = f"site from shift default ({default_site})"
-                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip(
-                            "; "
-                        )
+                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.72)
+                        note = f"site inferred from same sender in current shift ({inferred_site[1] or inferred_site[0]})"
+                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
+
+                # 2. Any sender, same shift (fallback)
+                if ev.get("site_id") is None and ev_shift_id:
+                    any_site = self._infer_site_from_any_sender_shift(conn, ev_shift_id)
+                    if any_site:
+                        ev["site_id"] = any_site[0]
+                        ev["site_alias"] = any_site[1]
+                        ev["inferred"] = True
+                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.65)
+                        note = f"site inferred from recent shift activity ({any_site[1] or any_site[0]})"
+                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
+
+                # 3. Shift default site (announced at shift start)
+                if ev.get("site_id") is None and ev_shift_id:
+                    default_sites = db.get_shift_default_sites(conn, ev_shift_id)
+                    if len(default_sites) == 1:
+                        ev["site_id"] = default_sites[0]
+                        ev["site_alias"] = ev.get("site_alias") or default_sites[0]
+                        ev["inferred"] = True
+                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.82)
+                        note = f"site from shift default ({default_sites[0]})"
+                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
+                    elif len(default_sites) > 1:
+                        # Multiple default sites — need operator to clarify
+                        # Leave site_id=None so UNKNOWN_SITE HITL fires below
+                        note = f"multiple default sites {default_sites} — operator must clarify"
+                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
 
             truck_id = ev.get("truck_id")
             site_id = ev.get("site_id")
@@ -707,6 +774,17 @@ class Committer:
                 new_value={"commit_status": event_commit_status},
             )
 
+            _inferred_tag = " [inferred]" if ev.get("inferred") else ""
+            log.info(
+                "[%s] %s %s → @%s  conf=%.2f%s",
+                event_commit_status,
+                truck_alias or truck_id or "?",
+                status,
+                site_alias or site_id or "?",
+                ev_confidence,
+                _inferred_tag,
+            )
+
             # Tally summary counters
             if event_commit_status == "COMMITTED":
                 summary["committed"] += 1
@@ -728,7 +806,7 @@ class Committer:
             for q_type, q_args in questions:
                 if q_type == "UNKNOWN_TRUCK":
                     if orig_truck_id:
-                        # LLM suggested a specific ID — ask operator to confirm or redirect
+                        # LLM suggested a specific ID that wasn't in DB — ask operator to confirm
                         hitl.create_unrecognized_truck_question(
                             conn,
                             msg_id,
@@ -740,6 +818,33 @@ class Committer:
                             self.simulation_run_id,
                             **wa_ctx,
                         )
+                    elif truck_alias:
+                        # Unknown alias with no LLM ID suggestion — auto-create the truck.
+                        # Only skip if we're certain it's ambiguous (no alias at all).
+                        new_truck_id = self._auto_create_truck_in_db(conn, truck_alias)
+                        if new_truck_id:
+                            # Update the event we just inserted to use the new truck_id
+                            conn.execute(
+                                "UPDATE events SET truck_id=?, commit_status='FLAGGED', commit_path='amber' WHERE event_id=?",
+                                (new_truck_id, event_id),
+                            )
+                            summary.setdefault("_new_trucks", []).append(
+                                (new_truck_id, truck_alias)
+                            )
+                            log.info("[AUTO-TRUCK] Event updated: truck_id=%s alias=%s", new_truck_id, truck_alias)
+                            # Don't create HITL question — truck is now registered
+                            continue
+                        else:
+                            hitl.create_unknown_truck_question(
+                                conn,
+                                msg_id,
+                                event_id,
+                                truck_alias,
+                                raw_text,
+                                self.simulation_run_id,
+                                **wa_ctx,
+                                reasoning=ev_reasoning,
+                            )
                     else:
                         hitl.create_unknown_truck_question(
                             conn,
@@ -790,6 +895,7 @@ class Committer:
                         **wa_ctx,
                         reasoning=ev_reasoning,
                     )
+                log.info("[HITL] Created %s question for %s", q_type, truck_alias or site_alias or "?")
                 summary["hitl_created"] += 1
 
     def _determine_commit_status(
