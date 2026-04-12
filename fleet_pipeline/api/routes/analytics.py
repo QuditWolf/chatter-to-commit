@@ -487,7 +487,7 @@ def shift_summary():
                 GROUP BY truck_id
               )
         """,
-            bind,
+            bind + bind,
         ).fetchall()
 
         # Trucks currently in unloading (latest event = US)
@@ -508,7 +508,7 @@ def shift_summary():
                 GROUP BY truck_id
               )
         """,
-            bind,
+            bind + bind,
         ).fetchall()
 
         # Per-truck LO count (load cycles) this shift
