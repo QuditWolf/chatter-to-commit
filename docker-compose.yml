@@ -10,7 +10,7 @@ services:
     environment:
       FLEET_DB_PATH:           /data/fleet.db
       FLEET_LOGS_DIR:          /logs
-      FLEET_LLM_BASE_URL:      ${FLEET_LLM_BASE_URL}
+      FLEET_LLM_BASE_URL:      ${FLEET_LLM_BASE_URL:-}
       FLEET_LLM_API_KEY:       ${FLEET_LLM_API_KEY:-EMPTY}
       FLEET_MODEL:             ${FLEET_MODEL:-Qwen2.5-32B-Instruct-Q4_K_M.gguf}
       FLEET_LLM_MAX_TOKENS:    ${FLEET_LLM_MAX_TOKENS:-1200}
