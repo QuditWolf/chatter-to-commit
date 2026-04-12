@@ -130,10 +130,25 @@ def _format_hitl_message(q_type: str, context: dict, raw_text: str) -> str:
     return f"❓ *Clarification needed*\n\nOriginal: {orig}"
 
 
+def _is_fleet_group(group_jid: str) -> bool:
+    """Return True if group_jid is the read-only fleet group (must never receive bot messages)."""
+    fleet = os.environ.get("WA_GROUP_JID", "")
+    return bool(fleet and group_jid and group_jid == fleet)
+
+
 def _post_send_reply(
     group_jid: str, text: str, quote_id: Optional[str]
 ) -> Optional[str]:
-    """POST to Node.js /send-reply. Returns bot_message_id or None on failure."""
+    """POST to Node.js /send-reply. Returns bot_message_id or None on failure.
+    Hard-blocks any attempt to send to the fleet (read-only) group.
+    """
+    if _is_fleet_group(group_jid):
+        log.error(
+            "wa_notifier: BLOCKED send-reply to fleet group %s — fleet group is read-only. "
+            "Set WA_CONTROL_GROUP_JID to route bot messages correctly.",
+            group_jid,
+        )
+        return None
     payload = json.dumps(
         {
             "group_jid": group_jid,
@@ -329,7 +344,16 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
 
 
 def _post_send_message(group_jid: str, text: str) -> Optional[str]:
-    """POST to Node.js /send-message. Returns bot_message_id or None on failure."""
+    """POST to Node.js /send-message. Returns bot_message_id or None on failure.
+    Hard-blocks any attempt to send to the fleet (read-only) group.
+    """
+    if _is_fleet_group(group_jid):
+        log.error(
+            "wa_notifier: BLOCKED send-message to fleet group %s — fleet group is read-only. "
+            "Set WA_CONTROL_GROUP_JID to route bot messages correctly.",
+            group_jid,
+        )
+        return None
     payload = json.dumps(
         {
             "group_jid": group_jid,
