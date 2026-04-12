@@ -164,6 +164,14 @@ th {
   border-bottom: 0.5px solid var(--color-border-tertiary);
 }
 td { padding: 7px 8px; color: var(--color-text-primary); border-bottom: 0.5px solid var(--color-border-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cl-body td { overflow: visible; text-overflow: unset; white-space: normal; vertical-align: top; }
+#cl-table th { position: relative; user-select: none; }
+#cl-table th .resize-handle {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize;
+  background: transparent; z-index: 2;
+}
+#cl-table th .resize-handle:hover { background: var(--color-accent-blue); opacity: 0.4; }
+#cl-table th .resize-handle.dragging { background: var(--color-accent-blue); opacity: 0.7; }
 tr:last-child td { border-bottom: none; }
 
 /* ── Status pills ────────────────────────────────────────────────── */
@@ -642,18 +650,16 @@ tr:last-child td { border-bottom: none; }
     </div>
 
     <!-- Table -->
-    <div style="overflow-x:auto">
-      <table>
+    <div id="cl-table-wrap" style="overflow-x:auto;position:relative">
+      <table id="cl-table" style="width:100%;table-layout:fixed">
+        <colgroup>
+          <col style="width:80px;min-width:80px"><col style="width:70px;min-width:60px"><col style="width:100px;min-width:80px">
+          <col style="width:80px;min-width:60px"><col style="width:60px;min-width:50px"><col style="width:90px;min-width:70px">
+          <col style="width:150px;min-width:100px"><col style=""><col style="width:80px;min-width:70px">
+        </colgroup>
         <thead><tr>
-          <th style="width:80px">Time</th>
-          <th style="width:55px">Truck</th>
-          <th style="width:110px">Status</th>
-          <th style="width:80px">Site</th>
-          <th style="width:55px">Conf</th>
-          <th style="width:75px">State</th>
-          <th style="width:130px">Source</th>
-          <th>Message · Reason</th>
-          <th style="width:80px;min-width:80px"></th>
+          <th>Time</th><th>Truck</th><th>Status</th><th>Site</th><th>Conf</th>
+          <th>State</th><th>Source</th><th>Message · Reason</th><th></th>
         </tr></thead>
         <tbody id="cl-body"><tr><td colspan="9" class="loading-indicator">Loading…</td></tr></tbody>
       </table>
@@ -1825,15 +1831,15 @@ async function loadCommits() {
         <td style="font-weight:500">${escHtml(shortTruck(ev.truck_alias, ev.truck_id))}</td>
         <td><span class="pill ${statusPillClass(ev.status)}">${statusLabel(ev.status)}</span>${infTag}</td>
         <td style="font-size:12px">${escHtml(ev.site_name||ev.site_alias||ev.site_id||'–')}</td>
-        <td>
+        <td style="vertical-align:middle">
           <div style="font-size:11px;color:var(--color-text-secondary)">${conf ? conf.toFixed(2) : '–'}</div>
-          <div style="height:3px;background:var(--color-border-tertiary);border-radius:2px;margin-top:3px">
+          <div style="height:3px;background:var(--color-border-tertiary);border-radius:2px;margin-top:3px;width:40px">
             <div style="height:3px;width:${barW}%;background:${barColor};border-radius:2px"></div>
           </div>
         </td>
         <td><span class="dot ${dotCls}" style="margin-right:4px"></span><span style="font-size:11px">${ev.commit_status}</span></td>
         <td style="font-size:11px;color:${srcColor};font-weight:500">${escHtml(ev.commit_source)}</td>
-        <td>${msg}</td>
+        <td class="full">${msg}</td>
         <td>${actions}</td>
       </tr>`;
     }).join('');
@@ -1987,6 +1993,54 @@ function switchTab(id, el) {
   if(id === 'commits')   { populateCommitFilters(); loadCommits(); }
   if(id === 'admin')     { loadTruckRegistry(); loadSiteRegistry(); loadShiftConfig(); loadMergeTrucks(); }
 }
+
+// ── Column resize for commits table ───────────────────────────────────────
+(function initClResize() {
+  const table = document.getElementById('cl-table');
+  if (!table) return;
+  const wrap = document.getElementById('cl-table-wrap');
+  const colgroup = table.querySelector('colgroup');
+  if (!colgroup) return;
+  const cols = Array.from(colgroup.querySelectorAll('col'));
+  const ths = Array.from(table.querySelectorAll('thead th'));
+
+  ths.forEach((th, i) => {
+    if (i === ths.length - 1) return; // skip last (actions) col
+    const handle = document.createElement('div');
+    handle.className = 'resize-handle';
+    th.appendChild(handle);
+  });
+
+  let dragging = null;
+
+  document.addEventListener('mousedown', e => {
+    const handle = e.target.closest('.resize-handle');
+    if (!handle) return;
+    const th = handle.closest('th');
+    if (!th) return;
+    const colIdx = ths.indexOf(th);
+    if (colIdx < 0 || colIdx >= cols.length) return;
+    dragging = { colIdx, startX: e.clientX, startWidth: cols[colIdx].offsetWidth };
+    handle.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - dragging.startX;
+    const newWidth = Math.max(40, dragging.startWidth + dx);
+    cols[dragging.colIdx].style.width = newWidth + 'px';
+    cols[dragging.colIdx].style.minWidth = newWidth + 'px';
+  });
+
+  document.addEventListener('mouseup', e => {
+    if (!dragging) return;
+    document.querySelectorAll('.resize-handle.dragging').forEach(h => h.classList.remove('dragging'));
+    document.body.style.cursor = '';
+    dragging = null;
+  });
+})();
 
 // ── Truck merge ───────────────────────────────────────────────────────────
 async function loadMergeTrucks() {
