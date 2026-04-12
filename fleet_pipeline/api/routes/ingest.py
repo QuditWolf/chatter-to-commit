@@ -171,6 +171,9 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
         or (WA_CONTROL_GROUP_JID and req.group_jid == WA_CONTROL_GROUP_JID)
     )
 
+    from fleet_pipeline.utils import to_ist as _to_ist
+    _ts_ist = _to_ist(req.received_at)
+
     # ── Control group: HITL answers, shift signals, summary requests ──────────
     if is_control:
         # HITL reply routing — operator replied to a bot clarification
@@ -178,6 +181,10 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
             with db.db_conn(DB_PATH) as conn:
                 hitl_q = db.get_open_question_by_bot_wa_id(conn, req.quoted_wa_message_id)
             if hitl_q:
+                log.info(
+                    "[CTRL] %s | from=%s | HITL reply → question %s | %r",
+                    _ts_ist, req.sender_phone, hitl_q["question_id"], req.raw_text[:80]
+                )
                 background_tasks.add_task(
                     _handle_wa_hitl_answer,
                     question=hitl_q,
@@ -190,6 +197,17 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
                     "routed_as": "hitl_answer",
                     "question_id": hitl_q["question_id"],
                 }
+            else:
+                log.info(
+                    "[CTRL] %s | from=%s | reply to unknown bot msg %s (no open HITL) — routing as control msg | %r",
+                    _ts_ist, req.sender_phone, req.quoted_wa_message_id[:12], req.raw_text[:80]
+                )
+
+        else:
+            log.info(
+                "[CTRL] %s | from=%s | plain control message | %r",
+                _ts_ist, req.sender_phone, req.raw_text[:80]
+            )
 
         # Shift signals + summary requests
         background_tasks.add_task(
@@ -203,6 +221,7 @@ async def ingest_wa_message(req: WAMessageRequest, background_tasks: BackgroundT
 
     # ── Fleet group: pipeline only — NEVER send messages back ─────────────────
     # All bot output (HITL questions, summaries) goes to the control group.
+    log.info("[FLEET] %s | from=%s | queuing pipeline | %r", _ts_ist, req.sender_phone, req.raw_text[:80])
     bot_group_jid = WA_CONTROL_GROUP_JID or req.group_jid
 
     await ws_manager.broadcast(
@@ -253,19 +272,26 @@ async def _handle_control_message(
     from fleet_pipeline.pipeline.shift_detector import detect_shift_signal, ShiftDetector
     from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group
     from fleet_pipeline.api.main import ws_manager
+    from fleet_pipeline.utils import to_ist
 
     text = raw_text.strip()
+    _ts_ist = to_ist(timestamp_iso) if timestamp_iso else "?"
+    log.info("[CTRL] %s | is_reply=%s | %r", _ts_ist, is_reply, text[:100])
 
     # Guard: never treat bot-generated summary messages as new triggers.
     # (The WA listener already filters fromMe=true, but double-guard here.)
     if text.startswith("\u2500\u2500") or text.startswith("--"):
+        log.info("[CTRL] Skipped — looks like bot-generated summary (prefix guard)")
         return
 
     # ── Shift signal (start/end) — only from plain messages, not replies ──────
     # Replies (quoted messages) are HITL answers; they must not accidentally
     # end the shift via phrases like "Loading Over" or "ALL trucks LEFT".
     signal = detect_shift_signal(text) if not is_reply else None
+    if is_reply and detect_shift_signal(text):
+        log.info("[CTRL] Shift signal %r suppressed — message is a reply (HITL answer)", detect_shift_signal(text))
     if signal in ("start", "end"):
+        log.info("[CTRL] Shift %s signal detected — processing", signal)
         try:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
@@ -308,6 +334,7 @@ async def _handle_control_message(
     ]
     for pat in _SUMMARY_RE:
         if pat.search(text):
+            log.info("[CTRL] Summary request matched — sending on-demand summary to group")
             try:
                 send_summary_to_group(group_jid, DB_PATH)
             except Exception as exc:
@@ -321,6 +348,7 @@ async def _handle_control_message(
     m = _MERGE_RE.match(text)
     if m:
         src_raw, dst_raw = m.group(1).strip(), m.group(2).strip()
+        log.info("[CTRL] MERGE command: %s → %s", src_raw, dst_raw)
         import sqlite3 as _sq
         try:
             conn = _sq.connect(DB_PATH)
@@ -352,6 +380,7 @@ async def _handle_control_message(
 
             if not src_id or not dst_id:
                 missing = src_raw if not src_id else dst_raw
+                log.warning("[CTRL] MERGE failed — trolley '%s' not found", missing)
                 notify_jid = _resolve_group_jid(group_jid)
                 if notify_jid:
                     _post_send_message(notify_jid, f"⚠️ MERGE failed: trolley '{missing}' not found.")
@@ -379,6 +408,8 @@ async def _handle_control_message(
         except Exception as exc:
             log.error("MERGE command failed: %s", exc)
         return
+
+    log.info("[CTRL] No action taken — message did not match shift signal, summary, or MERGE pattern")
 
 
 async def _handle_wa_hitl_answer(

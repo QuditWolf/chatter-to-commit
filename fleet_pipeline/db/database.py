@@ -239,45 +239,88 @@ def update_event_status(
 
 
 def get_recent_events_for_truck(
-    conn: sqlite3.Connection, truck_id: str, limit: int = 5
+    conn: sqlite3.Connection, truck_id: str, limit: int = 5, shift_id: Optional[str] = None
 ) -> List[Dict]:
-    rows = conn.execute(
-        """SELECT * FROM events WHERE truck_id=? AND commit_status='COMMITTED'
-           ORDER BY timestamp_effective DESC LIMIT ?""",
-        (truck_id, limit),
-    ).fetchall()
+    if shift_id:
+        rows = conn.execute(
+            """SELECT * FROM events WHERE truck_id=? AND shift_id=?
+               AND commit_status IN ('COMMITTED','FLAGGED')
+               ORDER BY timestamp_effective DESC LIMIT ?""",
+            (truck_id, shift_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT * FROM events WHERE truck_id=?
+               AND commit_status IN ('COMMITTED','FLAGGED')
+               ORDER BY timestamp_effective DESC LIMIT ?""",
+            (truck_id, limit),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_committed_events(conn: sqlite3.Connection, limit: int = 50) -> List[Dict]:
-    rows = conn.execute(
-        """SELECT e.*, t.display_name as truck_name, s.display_name as site_name
-           FROM events e
-           LEFT JOIN trucks t ON e.truck_id = t.truck_id
-           LEFT JOIN sites s ON e.site_id = s.site_id
-           WHERE e.commit_status = 'COMMITTED'
-           ORDER BY e.timestamp_effective DESC LIMIT ?""",
-        (limit,),
-    ).fetchall()
+def get_committed_events(
+    conn: sqlite3.Connection, limit: int = 50, shift_id: Optional[str] = None
+) -> List[Dict]:
+    if shift_id:
+        rows = conn.execute(
+            """SELECT e.*, t.display_name as truck_name, s.display_name as site_name
+               FROM events e
+               LEFT JOIN trucks t ON e.truck_id = t.truck_id
+               LEFT JOIN sites s ON e.site_id = s.site_id
+               WHERE e.commit_status IN ('COMMITTED','FLAGGED')
+                 AND e.shift_id=?
+               ORDER BY e.timestamp_effective DESC LIMIT ?""",
+            (shift_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT e.*, t.display_name as truck_name, s.display_name as site_name
+               FROM events e
+               LEFT JOIN trucks t ON e.truck_id = t.truck_id
+               LEFT JOIN sites s ON e.site_id = s.site_id
+               WHERE e.commit_status IN ('COMMITTED','FLAGGED')
+               ORDER BY e.timestamp_effective DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_fleet_state(conn: sqlite3.Connection) -> List[Dict]:
-    """Latest committed/flagged event per truck (fleet live state)."""
-    rows = conn.execute(
-        """SELECT e.*, t.display_name as truck_name, s.display_name as site_name
-           FROM events e
-           LEFT JOIN trucks t ON e.truck_id = t.truck_id
-           LEFT JOIN sites s ON e.site_id = s.site_id
-           WHERE e.commit_status IN ('COMMITTED', 'FLAGGED')
-             AND e.truck_id IS NOT NULL
-             AND e.rowid IN (
-               SELECT MAX(rowid) FROM events
-               WHERE commit_status IN ('COMMITTED', 'FLAGGED') AND truck_id IS NOT NULL
-               GROUP BY truck_id
-             )
-           ORDER BY e.truck_id"""
-    ).fetchall()
+def get_fleet_state(conn: sqlite3.Connection, shift_id: Optional[str] = None) -> List[Dict]:
+    """Latest committed/flagged event per truck, optionally scoped to a shift."""
+    if shift_id:
+        rows = conn.execute(
+            """SELECT e.*, t.display_name as truck_name, s.display_name as site_name
+               FROM events e
+               LEFT JOIN trucks t ON e.truck_id = t.truck_id
+               LEFT JOIN sites s ON e.site_id = s.site_id
+               WHERE e.commit_status IN ('COMMITTED', 'FLAGGED')
+                 AND e.truck_id IS NOT NULL
+                 AND e.shift_id = ?
+                 AND e.rowid IN (
+                   SELECT MAX(rowid) FROM events
+                   WHERE commit_status IN ('COMMITTED', 'FLAGGED')
+                     AND truck_id IS NOT NULL
+                     AND shift_id = ?
+                   GROUP BY truck_id
+                 )
+               ORDER BY e.truck_id""",
+            (shift_id, shift_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT e.*, t.display_name as truck_name, s.display_name as site_name
+               FROM events e
+               LEFT JOIN trucks t ON e.truck_id = t.truck_id
+               LEFT JOIN sites s ON e.site_id = s.site_id
+               WHERE e.commit_status IN ('COMMITTED', 'FLAGGED')
+                 AND e.truck_id IS NOT NULL
+                 AND e.rowid IN (
+                   SELECT MAX(rowid) FROM events
+                   WHERE commit_status IN ('COMMITTED', 'FLAGGED') AND truck_id IS NOT NULL
+                   GROUP BY truck_id
+                 )
+               ORDER BY e.truck_id"""
+        ).fetchall()
     return [dict(r) for r in rows]
 
 

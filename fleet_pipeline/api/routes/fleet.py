@@ -30,9 +30,13 @@ def invalidate_kpi_cache():
 
 @router.get("/state")
 def fleet_state():
-    """Current status of all active trucks (latest committed event per truck)."""
+    """Current status of all active trucks in the current shift (latest committed/flagged event per truck)."""
     with db_conn(DB_PATH) as conn:
-        state = get_fleet_state(conn)
+        active_shift = conn.execute(
+            "SELECT shift_id FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        shift_id = active_shift["shift_id"] if active_shift else None
+        state = get_fleet_state(conn, shift_id=shift_id)
     return {"trucks": state, "count": len(state)}
 
 
@@ -73,15 +77,23 @@ def fleet_kpis():
 
 @router.get("/truck/{truck_id}")
 def truck_detail(truck_id: str, limit: int = Query(default=10, le=100)):
-    """Recent committed events for a specific truck."""
+    """Recent committed/flagged events for a specific truck in the current shift."""
     with db_conn(DB_PATH) as conn:
-        events = get_recent_events_for_truck(conn, truck_id, limit=limit)
+        active_shift = conn.execute(
+            "SELECT shift_id FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        shift_id = active_shift["shift_id"] if active_shift else None
+        events = get_recent_events_for_truck(conn, truck_id, limit=limit, shift_id=shift_id)
     return {"truck_id": truck_id, "events": events, "count": len(events)}
 
 
 @router.get("/events")
 def recent_events(limit: int = Query(default=50, le=500)):
-    """Recent committed events across all trucks."""
+    """Recent committed/flagged events in the current shift."""
     with db_conn(DB_PATH) as conn:
-        events = get_committed_events(conn, limit=limit)
+        active_shift = conn.execute(
+            "SELECT shift_id FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        shift_id = active_shift["shift_id"] if active_shift else None
+        events = get_committed_events(conn, limit=limit, shift_id=shift_id)
     return {"events": events, "count": len(events)}
