@@ -1983,16 +1983,24 @@ async function loadShiftEvents() {
       const startTime = s.started_at ? formatIST(s.started_at) : '–';
       const endTime = s.ended_at ? formatIST(s.ended_at) : 'active';
       const sites = s.default_sites?.length ? s.default_sites.join(', ') : '–';
-      const delBtn = canDelete
-        ? `<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:var(--color-status-held)" onclick="deleteShift('${s.shift_id}')" title="Delete shift (0 events)">Del</button>`
-        : `<span style="font-size:10px;color:var(--color-text-secondary)">${evCount} ev</span>`;
+      // Only offer merge if there's a later shift to merge INTO
+      const canMerge = i < shifts.length - 1;
+      const actions = [];
+      if (canMerge) {
+        actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px" onclick="mergeShiftInto('${s.shift_id}')" title="Merge into shift below">Merge↓</button>`);
+      }
+      if (canDelete) {
+        actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:var(--color-status-held)" onclick="deleteShift('${s.shift_id}')" title="Delete shift (0 events)">Del</button>`);
+      } else {
+        actions.push(`<span style="font-size:10px;color:var(--color-text-secondary)">${evCount} ev</span>`);
+      }
       const row = document.createElement('tr');
       row.innerHTML = `<td style="font-weight:500">${escHtml(s.shift_name)}</td>
         <td>${startTime}</td>
         <td>${endTime}</td>
         <td>${evCount}</td>
         <td>${escHtml(sites)}</td>
-        <td>${delBtn}</td>`;
+        <td style="display:flex;gap:4px">${actions.join('')}</td>`;
       shiftBody.appendChild(row);
     }
     if (!shifts.length) {
@@ -2010,6 +2018,25 @@ async function deleteShift(shiftId) {
     await API(`/api/shifts/${shiftId}/delete`, { method: 'POST' });
     loadShiftEvents();
     loadShiftsForSelects();
+  } catch(e) {
+    alert(e.message);
+  }
+}
+
+async function mergeShiftInto(srcShiftId) {
+  const shifts = S.shifts || [];
+  const srcIdx = shifts.findIndex(s => s.shift_id === srcShiftId);
+  if (srcIdx < 0 || srcIdx >= shifts.length - 1) {
+    alert('No shift below to merge into.');
+    return;
+  }
+  const dstShift = shifts[srcIdx + 1];
+  if (!confirm(`Merge ${shifts[srcIdx].shift_name} into ${dstShift.shift_name}?`)) return;
+  try {
+    await API(`/api/shifts/merge?src_shift_id=${srcShiftId}&dst_shift_id=${dstShift.shift_id}`, { method: 'POST' });
+    loadShiftEvents();
+    populateShiftSelectors();
+    alert('Shifts merged.');
   } catch(e) {
     alert(e.message);
   }
