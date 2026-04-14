@@ -723,34 +723,33 @@ tr:last-child td { border-bottom: none; }
       <button class="page-btn" id="cl-next" onclick="changeCommitPage(1)">Next →</button>
     </div>
 
-    <!-- Shift Events -->
-    <div style="margin-top:20px;padding-top:16px;border-top:0.5px solid var(--color-border-secondary)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <h3 style="margin:0;font-size:13px;font-weight:600">Shift Events</h3>
-        <div style="display:flex;gap:6px">
-          <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="loadShiftEvents()">Refresh</button>
-          <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="openMergeShifts()">Merge</button>
-        </div>
-      </div>
-      <table id="se-table" style="width:100%;table-layout:fixed;font-size:11px">
-        <thead><tr>
-          <th style="width:140px">Shift</th><th style="width:90px">Status</th><th style="width:120px">Time</th><th style="width:80px">State</th><th>WA Message ID</th><th style="width:60px"></th>
-        </tr></thead>
-        <tbody id="se-body"><tr><td colspan="6" class="loading-indicator">Loading…</td></tr></tbody>
-      </table>
-    </div>
-
     <!-- Shifts Summary -->
     <div style="margin-top:20px;padding-top:16px;border-top:0.5px solid var(--color-border-secondary)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
         <h3 style="margin:0;font-size:13px;font-weight:600">Shifts</h3>
-        <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="loadShiftEvents()">Refresh</button>
+        <div style="display:flex;gap:6px">
+          <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="loadShiftEvents()">Refresh</button>
+          <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="openMergeShifts()">Merge</button>
+        </div>
       </div>
       <table id="shift-table" style="width:100%;table-layout:fixed;font-size:11px">
         <thead><tr>
           <th style="width:140px">Shift</th><th style="width:120px">Started</th><th style="width:100px">Ended</th><th style="width:60px">Events</th><th>Default Sites</th><th style="width:50px"></th>
         </tr></thead>
         <tbody id="shift-body"><tr><td colspan="6" class="loading-indicator">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <!-- Shift Events -->
+    <div style="margin-top:20px;padding-top:16px;border-top:0.5px solid var(--color-border-secondary)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h3 style="margin:0;font-size:13px;font-weight:600">Shift Events</h3>
+      </div>
+      <table id="se-table" style="width:100%;table-layout:fixed;font-size:11px">
+        <thead><tr>
+          <th style="width:140px">Shift</th><th style="width:90px">Status</th><th style="width:120px">Time</th><th style="width:80px">State</th><th>WA Message ID</th><th style="width:60px"></th>
+        </tr></thead>
+        <tbody id="se-body"><tr><td colspan="6" class="empty-state">No shift events</td></tr></tbody>
       </table>
     </div>
   </div>
