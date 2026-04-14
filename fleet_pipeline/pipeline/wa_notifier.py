@@ -118,12 +118,28 @@ def _format_hitl_message(q_type: str, context: dict, raw_text: str) -> str:
     if q_type == "CORRECTION_AMBIGUOUS":
         why = f"\n_Reason: {reasoning}_" if reasoning else ""
         return (
-            f"❓ *Ambiguous correction* — unclear what to change.{why}\n\n"
+            f"? *Ambiguous correction* — unclear what to change.{why}\n\n"
             f"Original: {orig}\n\n"
             f"Please clarify — reply in any form:\n"
             f"• _D left not B, B is still at KN4_\n"
             f"• Corrected full message  e.g.  `TD LS SOC`\n"
             f"• Which truck / status / site to change and what it should be"
+        )
+
+    if q_type == "ENTER_ENTER_GAP":
+        gap_min = context.get("gap_minutes", 0)
+        prev_ts = context.get("previous_enter_ts", "")
+        new_ts = context.get("new_enter_ts", "")
+        truck_alias = context.get("truck_alias", "?")
+        site_alias = context.get("site_alias", "?")
+        return (
+            f"? *ENTER->ENTER gap* — {truck_alias} at {site_alias}\n\n"
+            f"Gap: {gap_min} min ({prev_ts} -> {new_ts}).\n"
+            f"No loading activity recorded after the first ENTER.\n\n"
+            f"Reply with:\n"
+            f"• YES to confirm first ENTER started a cycle (we'll infer LS/LO/LEFT)\n"
+            f"• Corrected events  e.g.  `{truck_alias} LS {site_alias}` to add missing LS\n"
+            f"• NO if this is NOT a new cycle"
         )
 
     # Fallback

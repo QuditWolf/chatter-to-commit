@@ -209,6 +209,25 @@ async def submit_answer(req: AnswerRequest, background_tasks: BackgroundTasks):
                 else:
                     reprocess = True
 
+        # ── ENTER_ENTER_GAP: commit or discard HELD inferred events ──────────
+        elif q_type == "ENTER_ENTER_GAP":
+            held_ids = context.get("held_event_ids", [])
+            if _is_affirmative(answer) or answer.upper() == "YES":
+                # Commit all held inferred events
+                for eid in held_ids:
+                    conn.execute(
+                        "UPDATE events SET commit_status='FLAGGED', commit_path='amber', "
+                        "corrected=1 WHERE event_id=? AND commit_status='HELD'",
+                        (eid,),
+                    )
+            else:
+                # Discard held inferred events (operator says no cycle occurred)
+                for eid in held_ids:
+                    conn.execute(
+                        "UPDATE events SET commit_status='DELETED' WHERE event_id=? AND commit_status='HELD'",
+                        (eid,),
+                    )
+
         # ── CORRECTION_AMBIGUOUS: always re-process ───────────────────────────
         elif q_type == "CORRECTION_AMBIGUOUS":
             reprocess = True

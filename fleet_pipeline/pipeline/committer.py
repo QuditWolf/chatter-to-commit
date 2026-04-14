@@ -41,6 +41,27 @@ SITE_REQUIRED_STATUSES = {"ENTER", "LS", "LO", "LEFT", "US", "UO"}
 # All valid truck event statuses — anything outside this set is an LLM hallucination
 VALID_STATUSES = {"ENTER", "LS", "LO", "LEFT", "US", "UO", "UNKNOWN"}
 
+# Cycle detection gap thresholds (seconds) per last committed status:
+#   ENTER: 85 min — ambiguous (no LS evidence) → blocking HITL to confirm
+#   LS/US: 60 min — loading/unloading started → infer LO/UO + LEFT non-blocking
+#   LO/UO: 50 min — loading/unloading over   → infer LEFT non-blocking
+_CYCLE_GAP_BY_STATUS = {
+    "ENTER": 85 * 60,
+    "LS":    60 * 60,
+    "US":    60 * 60,
+    "LO":    50 * 60,
+    "UO":    50 * 60,
+}
+CYCLE_GAP_THRESHOLD_SECONDS = 60 * 60  # kept for log messages only
+
+# Cycle status order for detecting same/earlier cycle position
+_CYCLE_ORDER = {"ENTER": 0, "LS": 1, "US": 1, "LO": 2, "UO": 2, "LEFT": 3}
+
+# Default durations for inferring missing events
+_DEFAULT_ENTER_TO_LS_SECONDS = 5 * 60  # 5 min
+_DEFAULT_LS_TO_LO_SECONDS = 30 * 60  # 30 min
+_DEFAULT_LO_TO_LEFT_SECONDS = 5 * 60  # 5 min
+
 # Short confirmations that carry no useful correction context
 _NOISE_PHRASES = {
     "yes",
@@ -267,6 +288,455 @@ def _apply_inferred_timestamps(events: list) -> None:
                     break
 
 
+def _detect_and_fill_cycle_gap(
+    conn,
+    new_events: List[Dict[str, Any]],
+    shift_id: Optional[str],
+    db_path: str,
+    msg_id: Optional[str] = None,
+    processing_id: Optional[str] = None,
+    simulation_run_id: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Detect cycle gaps and directly insert inferred completion events into the DB.
+
+    For each new event, look up the last committed event for that truck in the shift.
+    If the gap >= per-status threshold AND the new event is at the same or earlier
+    cycle position (indicating a new cycle started), infer the missing completion events.
+
+    Non-blocking (LS/US/LO/UO stuck): insert FLAGGED inferred events, return WA notification.
+    Blocking (ENTER→new cycle with 85+ min gap): insert HELD inferred events, return HITL item.
+
+    Completed cycles (last_status == "LEFT") are never re-triggered.
+
+    Returns:
+        notifications       — list of WA notification dicts (one per detected old cycle)
+        blocking_hitl_items — list of dicts for creating ENTER_ENTER_GAP HITL questions
+    """
+    notifications: List[Dict] = []
+    blocking_hitl_items: List[Dict] = []
+
+    if not shift_id:
+        return notifications, blocking_hitl_items
+
+    for ev in new_events:
+        truck_id = ev.get("truck_id")
+        new_status = ev.get("status", "")
+        new_ts_str = ev.get("timestamp_effective", "")
+
+        if not truck_id or new_status not in _CYCLE_ORDER or not new_ts_str:
+            continue
+
+        new_ts = _parse_ts(new_ts_str)
+        if not new_ts:
+            continue
+
+        last_event_row = conn.execute(
+            """SELECT event_id, status, site_id, site_alias, truck_alias,
+                      timestamp_effective, commit_status
+               FROM events
+               WHERE truck_id=? AND shift_id=? AND commit_status IN ('COMMITTED','FLAGGED')
+               ORDER BY timestamp_effective DESC, rowid DESC LIMIT 1""",
+            (truck_id, shift_id),
+        ).fetchone()
+
+        if not last_event_row:
+            continue
+
+        last_status = last_event_row["status"]
+        # Cycle complete — nothing to infer
+        if last_status == "LEFT":
+            continue
+        if last_status not in _CYCLE_ORDER:
+            continue
+
+        last_ts = _parse_ts(last_event_row["timestamp_effective"])
+        if not last_ts:
+            continue
+
+        gap_seconds = (new_ts - last_ts).total_seconds()
+        gap_threshold = _CYCLE_GAP_BY_STATUS.get(last_status, 60 * 60)
+        if gap_seconds < gap_threshold:
+            continue
+
+        last_cycle_pos = _CYCLE_ORDER[last_status]
+        new_cycle_pos = _CYCLE_ORDER[new_status]
+
+        # New cycle only if same or earlier position
+        if new_cycle_pos > last_cycle_pos:
+            continue
+
+        truck_alias = last_event_row["truck_alias"] or ev.get("truck_alias", "") or truck_id
+        site_id = last_event_row["site_id"] or ev.get("site_id")
+        site_alias = last_event_row["site_alias"] or ev.get("site_alias", "") or ""
+
+        if last_status == "ENTER":
+            notif, hitl_item = _infer_full_cycle_for_enter_gap(
+                conn,
+                truck_id=truck_id,
+                truck_alias=truck_alias,
+                site_id=site_id,
+                site_alias=site_alias,
+                last_ts=last_ts,
+                new_ts=new_ts,
+                shift_id=shift_id,
+                msg_id=msg_id,
+                processing_id=processing_id,
+                simulation_run_id=simulation_run_id,
+            )
+            if notif:
+                notifications.append(notif)
+            if hitl_item:
+                blocking_hitl_items.append(hitl_item)
+        else:
+            notif = _infer_cycle_completion(
+                conn,
+                truck_id=truck_id,
+                truck_alias=truck_alias,
+                last_status=last_status,
+                site_id=site_id,
+                site_alias=site_alias,
+                last_ts=last_ts,
+                shift_id=shift_id,
+                msg_id=msg_id,
+                processing_id=processing_id,
+                simulation_run_id=simulation_run_id,
+            )
+            if notif:
+                notifications.append(notif)
+
+    return notifications, blocking_hitl_items
+
+
+def _infer_cycle_completion(
+    conn,
+    truck_id: str,
+    truck_alias: str,
+    last_status: str,
+    site_id: Optional[str],
+    site_alias: str,
+    last_ts,
+    shift_id: str,
+    msg_id: Optional[str] = None,
+    processing_id: Optional[str] = None,
+    simulation_run_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Insert missing completion events directly into DB for LS/US/LO/UO stuck state.
+    Returns one aggregated WA notification dict, or None if nothing to infer.
+    """
+    from datetime import timedelta
+
+    if not site_id:
+        return None
+
+    events_to_create: List[Tuple] = []
+    if last_status == "LS":
+        lo_ts = last_ts + timedelta(seconds=_DEFAULT_LS_TO_LO_SECONDS)
+        left_ts = lo_ts + timedelta(seconds=_DEFAULT_LO_TO_LEFT_SECONDS)
+        events_to_create = [("LO", lo_ts), ("LEFT", left_ts)]
+    elif last_status == "US":
+        uo_ts = last_ts + timedelta(seconds=_DEFAULT_LS_TO_LO_SECONDS)
+        left_ts = uo_ts + timedelta(seconds=_DEFAULT_LO_TO_LEFT_SECONDS)
+        events_to_create = [("UO", uo_ts), ("LEFT", left_ts)]
+    elif last_status == "LO":
+        left_ts = last_ts + timedelta(seconds=_DEFAULT_LO_TO_LEFT_SECONDS)
+        events_to_create = [("LEFT", left_ts)]
+    elif last_status == "UO":
+        left_ts = last_ts + timedelta(seconds=_DEFAULT_LO_TO_LEFT_SECONDS)
+        events_to_create = [("LEFT", left_ts)]
+
+    if not events_to_create:
+        return None
+
+    threshold_min = _CYCLE_GAP_BY_STATUS.get(last_status, 60 * 60) // 60
+    inserted: List[Tuple[str, str]] = []  # (status, ts_str)
+
+    for status, ts in events_to_create:
+        event_id = str(uuid4())
+        db.insert_event(
+            conn,
+            {
+                "event_id": event_id,
+                "msg_id": msg_id,
+                "truck_id": truck_id,
+                "truck_alias": truck_alias,
+                "status": status,
+                "site_id": site_id,
+                "site_alias": site_alias,
+                "timestamp_effective": _fmt_ts(ts),
+                "timestamp_approximate": True,
+                "inferred": True,
+                "confidence": 0.65,
+                "reasoning": (
+                    f"inferred: gap >= {threshold_min}min since {last_status}, "
+                    f"auto-completed cycle at default interval"
+                ),
+                "commit_status": "FLAGGED",
+                "commit_path": "amber",
+                "shift_id": shift_id,
+                "processing_id": processing_id,
+                "simulation_run_id": simulation_run_id,
+                "wa_message_id": None,
+            },
+        )
+        inserted.append((status, _fmt_ts(ts)))
+        log.info(
+            "[INFERRED] %s %s → @%s (gap >= %dmin since %s)",
+            truck_alias or truck_id, status, site_alias or site_id, threshold_min, last_status,
+        )
+
+    truck_display = truck_alias or truck_id
+    site_display = site_alias or site_id or "?"
+    status_list = ", ".join(f"{s} at {t}" for s, t in inserted)
+    return {
+        "type": "inferred_cycle_completion",
+        "blocking": False,
+        "truck_id": truck_id,
+        "truck_alias": truck_alias,
+        "truck_display": truck_display,
+        "site_id": site_id,
+        "site_alias": site_alias,
+        "site_display": site_display,
+        "last_status": last_status,
+        "inferred_statuses": inserted,
+        "status_list": status_list,
+        "threshold_min": threshold_min,
+    }
+
+
+def _infer_full_cycle_for_enter_gap(
+    conn,
+    truck_id: str,
+    truck_alias: str,
+    site_id: Optional[str],
+    site_alias: str,
+    last_ts,
+    new_ts,
+    shift_id: str,
+    msg_id: Optional[str] = None,
+    processing_id: Optional[str] = None,
+    simulation_run_id: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    ENTER→ENTER case: insert HELD LS/LO/LEFT events (pending human confirmation)
+    and return (notification_dict, hitl_item_dict).
+
+    If site is unknown, inserts nothing but still returns blocking notification + hitl_item
+    so the operator is asked for the site.
+    """
+    from datetime import timedelta
+
+    gap_min = int((new_ts - last_ts).total_seconds() / 60)
+    threshold_min = _CYCLE_GAP_BY_STATUS.get("ENTER", 85 * 60) // 60
+    truck_display = truck_alias or truck_id
+    site_display = site_alias or site_id or "?"
+
+    held_event_ids: List[str] = []
+
+    if site_id:
+        ls_ts = last_ts + timedelta(seconds=_DEFAULT_ENTER_TO_LS_SECONDS)
+        lo_ts = ls_ts + timedelta(seconds=_DEFAULT_LS_TO_LO_SECONDS)
+        left_ts = lo_ts + timedelta(seconds=_DEFAULT_LO_TO_LEFT_SECONDS)
+
+        for status, ts in [("LS", ls_ts), ("LO", lo_ts), ("LEFT", left_ts)]:
+            event_id = str(uuid4())
+            db.insert_event(
+                conn,
+                {
+                    "event_id": event_id,
+                    "msg_id": msg_id,
+                    "truck_id": truck_id,
+                    "truck_alias": truck_alias,
+                    "status": status,
+                    "site_id": site_id,
+                    "site_alias": site_alias,
+                    "timestamp_effective": _fmt_ts(ts),
+                    "timestamp_approximate": True,
+                    "inferred": True,
+                    "confidence": 0.55,
+                    "reasoning": (
+                        f"inferred: ENTER→ENTER gap {gap_min}min >= {threshold_min}min, "
+                        f"{status} at default interval — HELD pending operator confirmation"
+                    ),
+                    "commit_status": "HELD",
+                    "commit_path": "red",
+                    "shift_id": shift_id,
+                    "processing_id": processing_id,
+                    "simulation_run_id": simulation_run_id,
+                    "wa_message_id": None,
+                },
+            )
+            held_event_ids.append(event_id)
+            log.info(
+                "[HELD] %s %s → @%s (ENTER→ENTER gap %dmin, pending confirmation)",
+                truck_display, status, site_display, gap_min,
+            )
+
+    notification = {
+        "type": "blocking_hitl_enter_enter_gap",
+        "blocking": True,
+        "truck_id": truck_id,
+        "truck_alias": truck_alias,
+        "truck_display": truck_display,
+        "site_id": site_id,
+        "site_alias": site_alias,
+        "site_display": site_display,
+        "previous_enter_ts": _fmt_ts(last_ts),
+        "new_enter_ts": _fmt_ts(new_ts),
+        "gap_minutes": gap_min,
+        "held_event_ids": held_event_ids,
+    }
+
+    hitl_item = {
+        "truck_id": truck_id,
+        "truck_alias": truck_alias,
+        "site_id": site_id,
+        "site_alias": site_alias,
+        "previous_enter_ts": _fmt_ts(last_ts),
+        "new_enter_ts": _fmt_ts(new_ts),
+        "gap_minutes": gap_min,
+        "held_event_ids": held_event_ids,
+    }
+
+    return notification, hitl_item
+
+
+def close_open_cycles_at_shift_end(
+    db_path: str,
+    shift_id: str,
+    shift_end_ts,
+    group_jid: Optional[str] = None,
+) -> None:
+    """
+    Close all open truck cycles at shift end by inserting inferred completion events.
+    Called when a shift ends (via WA signal, manual, or auto-end inactivity).
+    """
+    from datetime import timedelta
+
+    trucks_closed = []
+
+    with db.db_conn(db_path) as conn:
+        # Get the last committed event per truck in this shift
+        rows = conn.execute(
+            """SELECT e.truck_id, e.truck_alias, e.site_id, e.site_alias, e.status
+               FROM events e
+               INNER JOIN (
+                   SELECT truck_id, MAX(timestamp_effective) AS max_ts
+                   FROM events
+                   WHERE shift_id=? AND commit_status IN ('COMMITTED','FLAGGED')
+                     AND truck_id IS NOT NULL
+                   GROUP BY truck_id
+               ) latest ON e.truck_id = latest.truck_id
+                        AND e.timestamp_effective = latest.max_ts
+               WHERE e.shift_id=? AND e.commit_status IN ('COMMITTED','FLAGGED')
+               GROUP BY e.truck_id
+               ORDER BY e.truck_id""",
+            (shift_id, shift_id),
+        ).fetchall()
+
+        # Parse shift-end timestamp
+        if isinstance(shift_end_ts, str):
+            end_ts = _parse_ts(shift_end_ts)
+        else:
+            end_ts = shift_end_ts
+        if not end_ts:
+            log.warning("close_open_cycles_at_shift_end: cannot parse shift_end_ts=%r", shift_end_ts)
+            return
+
+        for row in rows:
+            last_status = row["status"]
+            if last_status == "LEFT":
+                continue  # Already complete
+
+            truck_id = row["truck_id"]
+            site_id = row["site_id"]
+            if not site_id:
+                continue
+
+            truck_alias = row["truck_alias"] or truck_id
+            site_alias = row["site_alias"] or ""
+
+            events_to_create: List[Tuple] = []
+            if last_status == "ENTER":
+                events_to_create = [
+                    ("LS", end_ts - timedelta(minutes=35)),
+                    ("LO", end_ts - timedelta(minutes=5)),
+                    ("LEFT", end_ts),
+                ]
+            elif last_status == "LS":
+                events_to_create = [
+                    ("LO", end_ts - timedelta(minutes=5)),
+                    ("LEFT", end_ts),
+                ]
+            elif last_status == "US":
+                events_to_create = [
+                    ("UO", end_ts - timedelta(minutes=5)),
+                    ("LEFT", end_ts),
+                ]
+            elif last_status in ("LO", "UO"):
+                events_to_create = [("LEFT", end_ts)]
+
+            for status, ts in events_to_create:
+                db.insert_event(
+                    conn,
+                    {
+                        "event_id": str(uuid4()),
+                        "msg_id": None,
+                        "truck_id": truck_id,
+                        "truck_alias": truck_alias,
+                        "status": status,
+                        "site_id": site_id,
+                        "site_alias": site_alias,
+                        "timestamp_effective": _fmt_ts(ts),
+                        "timestamp_approximate": True,
+                        "inferred": True,
+                        "confidence": 0.65,
+                        "reasoning": "inferred: shift ended, cycle auto-closed at shift-end time",
+                        "commit_status": "FLAGGED",
+                        "commit_path": "amber",
+                        "shift_id": shift_id,
+                        "wa_message_id": None,
+                    },
+                )
+
+            if events_to_create:
+                trucks_closed.append({
+                    "truck_alias": truck_alias,
+                    "truck_id": truck_id,
+                    "site_alias": site_alias,
+                    "site_id": site_id,
+                    "last_status": last_status,
+                    "inferred_statuses": [s for s, _ in events_to_create],
+                })
+                log.info(
+                    "[SHIFT-END] Auto-closed cycle for %s at %s (was: %s)",
+                    truck_alias, site_alias or site_id, last_status,
+                )
+
+    if trucks_closed and group_jid:
+        try:
+            from fleet_pipeline.pipeline.wa_notifier import (
+                _post_send_message,
+                _resolve_group_jid,
+            )
+
+            notify_jid = _resolve_group_jid(group_jid)
+            if notify_jid:
+                lines = ["Shift ended. Open cycles auto-closed (inferred at shift-end time)."]
+                for t in trucks_closed:
+                    inferred = ", ".join(t["inferred_statuses"])
+                    lines.append(
+                        f"  {t['truck_alias'] or t['truck_id']} at "
+                        f"{t['site_alias'] or t['site_id']}: "
+                        f"inferred {inferred} (from {t['last_status']})"
+                    )
+                lines.append("Optional to reply to correct.")
+                _post_send_message(notify_jid, "\n".join(lines))
+        except Exception as exc:
+            log.warning("close_open_cycles_at_shift_end: WA notify failed: %s", exc)
+
+
 class Committer:
     def __init__(
         self,
@@ -426,6 +896,53 @@ class Committer:
                         _post_send_message(notify_jid, msg)
                 except Exception as _exc:
                     log.warning("Failed to notify new truck creation: %s", _exc)
+
+        # Send cycle gap notifications (one WA message per detected old cycle)
+        for cycle_notif in summary.pop("_cycle_notifications", []):
+            if self.group_jid:
+                try:
+                    from fleet_pipeline.pipeline.wa_notifier import (
+                        _post_send_message,
+                        _resolve_group_jid,
+                    )
+                    from fleet_pipeline.config import WA_CONTROL_GROUP_JID
+
+                    notify_jid = _resolve_group_jid(
+                        WA_CONTROL_GROUP_JID or self.group_jid
+                    )
+                    if notify_jid:
+                        notif_type = cycle_notif.get("type", "")
+                        if notif_type == "inferred_cycle_completion":
+                            td = cycle_notif.get("truck_display", "?")
+                            sd = cycle_notif.get("site_display", "?")
+                            last_st = cycle_notif.get("last_status", "?")
+                            sl = cycle_notif.get("status_list", "")
+                            thresh = cycle_notif.get("threshold_min", 60)
+                            msg = (
+                                f"Cycle completion inferred: {td} at {sd}\n"
+                                f"Previous status: {last_st} (gap >= {thresh} min)\n"
+                                f"Inferred: {sl}\n"
+                                f"Committed with flag. Optional to reply to correct."
+                            )
+                            _post_send_message(notify_jid, msg)
+                        elif notif_type == "blocking_hitl_enter_enter_gap":
+                            td = cycle_notif.get("truck_display", "?")
+                            sd = cycle_notif.get("site_display", "?")
+                            prev_ts = cycle_notif.get("previous_enter_ts", "")
+                            new_ts_str = cycle_notif.get("new_enter_ts", "")
+                            gap_min = cycle_notif.get("gap_minutes", 0)
+                            msg = (
+                                f"ENTER->ENTER gap: {td} at {sd}\n"
+                                f"Previous ENTER: {prev_ts}\n"
+                                f"New ENTER: {new_ts_str}\n"
+                                f"Gap: {gap_min} min. No loading activity recorded.\n"
+                                f"Inferred LS/LO/LEFT at default times (HELD).\n"
+                                f"*Waiting for response before committing these events.*\n"
+                                f"Reply YES to confirm cycle or NO to cancel."
+                            )
+                            _post_send_message(notify_jid, msg)
+                except Exception as _exc:
+                    log.warning("Failed to send cycle notification: %s", _exc)
 
         return summary
 
@@ -759,6 +1276,41 @@ class Committer:
                     ev["_orig_site_id"] = ev["site_id"]
                     ev["site_id"] = None
 
+        # ── Cycle gap detection (BEFORE expanded loop) ────────────────────────
+        # Detect incomplete previous cycles and insert inferred completion events
+        # directly into the DB now, BEFORE the expanded loop runs
+        # _needs_inferred_enter(). That way the DB already has the inferred LEFT
+        # and will correctly inject an ENTER for the new cycle.
+        if resolved_shift_id and not self.simulation_run_id:
+            _cycle_notifs, _blocking_hitl_items = _detect_and_fill_cycle_gap(
+                conn,
+                events,
+                resolved_shift_id,
+                self.db_path,
+                msg_id=msg_id,
+                processing_id=processing_id,
+                simulation_run_id=self.simulation_run_id,
+            )
+            summary["_cycle_notifications"] = _cycle_notifs
+            # Create HITL questions for blocking ENTER→ENTER gap cases
+            for _hi in _blocking_hitl_items:
+                hitl.create_enter_enter_gap_question(
+                    conn,
+                    truck_alias=_hi.get("truck_alias", ""),
+                    truck_id=_hi.get("truck_id", ""),
+                    site_alias=_hi.get("site_alias", ""),
+                    site_id=_hi.get("site_id"),
+                    previous_enter_ts=_hi.get("previous_enter_ts", ""),
+                    new_enter_ts=_hi.get("new_enter_ts", ""),
+                    gap_minutes=_hi.get("gap_minutes", 0),
+                    held_event_ids=_hi.get("held_event_ids", []),
+                    msg_id=msg_id,
+                    simulation_run_id=self.simulation_run_id,
+                    original_wa_message_id=self.wa_message_id,
+                    group_jid=self.group_jid,
+                )
+                summary["hitl_created"] += 1
+
         expanded = []
         enters_in_batch: set = set()
         for ev in events:
@@ -802,10 +1354,13 @@ class Committer:
             expanded.append(ev)
         events = expanded
 
-        # Sort events by logical cycle order so that ENTER → LS/US → LO/UO → LEFT
-        # are committed in the correct sequence regardless of LLM output order.
+        # Sort events: timestamp first, then cycle order.
+        # This ensures multi-cycle batches (rare) are committed in correct order.
         _STATUS_ORDER = {"ENTER": 0, "LS": 1, "US": 1, "LO": 2, "UO": 2, "LEFT": 3}
-        events.sort(key=lambda e: _STATUS_ORDER.get(e.get("status", ""), 99))
+        events.sort(key=lambda e: (
+            e.get("timestamp_effective", ""),
+            _STATUS_ORDER.get(e.get("status", ""), 99),
+        ))
 
         # ── Inferred-event timestamp offsetting ──────────────────────────────
         # When a message contains multiple explicit events for the same truck
@@ -826,13 +1381,11 @@ class Committer:
         _apply_inferred_timestamps(events)
 
         for ev in events:
-            # Drop events with hallucinated / non-existent status values
+            # Guard: drop LLM hallucinations with invalid status codes
             if ev.get("status") not in VALID_STATUSES:
-                import warnings
-
-                warnings.warn(
-                    f"[Committer] Dropping event with invalid status {ev.get('status')!r} "
-                    f"for truck {ev.get('truck_id')!r} — likely LLM hallucination"
+                log.warning(
+                    "[INVALID_STATUS] Dropping event status=%r — not in VALID_STATUSES",
+                    ev.get("status"),
                 )
                 continue
 

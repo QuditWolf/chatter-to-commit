@@ -635,8 +635,21 @@ async def _handle_control_message(
                     DB_PATH,
                 )
 
-            # After ending a shift via WA signal, post final summary
-            if signal == "end":
+            # After ending a shift via WA signal: close open cycles, then post summary
+            if signal == "end" and new_shift:
+                try:
+                    from fleet_pipeline.pipeline.committer import close_open_cycles_at_shift_end
+                    from fleet_pipeline.pipeline.wa_notifier import _resolve_group_jid
+
+                    _cyc_jid = _resolve_group_jid(ctrl_jid)
+                    close_open_cycles_at_shift_end(
+                        DB_PATH,
+                        new_shift["shift_id"],
+                        ts.isoformat(),
+                        group_jid=_cyc_jid,
+                    )
+                except Exception as _cyc_exc:
+                    log.warning("Shift-end cycle close failed: %s", _cyc_exc)
                 try:
                     from fleet_pipeline.pipeline.wa_notifier import (
                         send_summary_to_group,

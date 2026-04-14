@@ -112,13 +112,29 @@ async def lifespan(application: FastAPI):
                                 send_summary_to_group(summary_jid, _DB_PATH)
                             except Exception as _exc:
                                 log.warning("Auto-end summary post failed: %s", _exc)
-                        sd._end(now_ist())
+                        _ended_shift_id = sd._active.get("shift_id") if sd._active else shift_id_log
+                        _end_ts = now_ist()
+                        sd._end(_end_ts)
                         conn.commit()
                         log.info(
                             "Auto-ended shift %s after %.0fs inactivity",
                             shift_id_log,
                             gap,
                         )
+                        # Close any open truck cycles at shift end
+                        try:
+                            from fleet_pipeline.pipeline.committer import (
+                                close_open_cycles_at_shift_end,
+                            )
+
+                            close_open_cycles_at_shift_end(
+                                _DB_PATH,
+                                _ended_shift_id or shift_id_log,
+                                _end_ts.isoformat(),
+                                group_jid=summary_jid,
+                            )
+                        except Exception as _cyc_exc:
+                            log.warning("Auto-end cycle close failed: %s", _cyc_exc)
                         await ws_manager.broadcast(
                             "shift_changed", {"reason": "auto_end_inactivity"}
                         )
