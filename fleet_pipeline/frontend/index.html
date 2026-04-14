@@ -722,6 +722,23 @@ tr:last-child td { border-bottom: none; }
       <span id="cl-page-info" style="color:var(--color-text-secondary)"></span>
       <button class="page-btn" id="cl-next" onclick="changeCommitPage(1)">Next →</button>
     </div>
+
+    <!-- Shift Events -->
+    <div style="margin-top:20px;padding-top:16px;border-top:0.5px solid var(--color-border-secondary)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h3 style="margin:0;font-size:13px;font-weight:600">Shift Events</h3>
+        <div style="display:flex;gap:6px">
+          <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="loadShiftEvents()">Refresh</button>
+          <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="openMergeShifts()">Merge</button>
+        </div>
+      </div>
+      <table id="se-table" style="width:100%;table-layout:fixed;font-size:11px">
+        <thead><tr>
+          <th style="width:140px">Shift</th><th style="width:90px">Status</th><th style="width:120px">Time</th><th style="width:80px">State</th><th>WA Message ID</th><th style="width:60px"></th>
+        </tr></thead>
+        <tbody id="se-body"><tr><td colspan="6" class="loading-indicator">Loading…</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
   <!-- Add / Edit commit modal -->
@@ -1908,6 +1925,69 @@ async function runNL() {
 
 // ── Commits log ───────────────────────────────────────────────────────────
 const CL = { page: 1, totalPages: 1, search: '', searchTimer: null };
+const SE = { shiftId: '' };
+
+async function loadShiftEvents() {
+  const tbody = document.getElementById('se-body');
+  tbody.innerHTML = '<tr><td colspan="6" class="loading-indicator">Loading…</td></tr>';
+  try {
+    const params = SE.shiftId ? `shift_id=${SE.shiftId}` : '';
+    const d = await API(`/api/shift-events${params ? '?'+params : ''}`);
+    if (!d.items || !d.items.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No shift events</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.items.map(ev => {
+      const statusBadge = ev.status === 'SHIFT_START' 
+        ? '<span class="pill" style="background:#DCFCE7;color:#166534">START</span>'
+        : '<span class="pill" style="background:#FEE2E2;color:#991B1B">END</span>';
+      const stateBadge = ev.commit_status === 'COMMITTED'
+        ? '<span class="dot green" style="margin-right:3px"></span>Committed'
+        : '<span class="dot red" style="margin-right:3px"></span>Deleted';
+      const waId = ev.wa_message_id ? `${ev.wa_message_id.slice(0,12)}…` : '–';
+      const actions = ev.commit_status === 'COMMITTED'
+        ? `<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:var(--color-status-held)" onclick="deleteShift('${ev.shift_id}')">Del</button>`
+        : '';
+      return `<tr>
+        <td style="font-weight:500">${escHtml(ev.shift_name)}</td>
+        <td>${statusBadge}</td>
+        <td style="color:var(--color-text-secondary)">${fmtTime(ev.timestamp_iso)}</td>
+        <td>${stateBadge}</td>
+        <td style="font-size:10px;font-family:var(--font-mono)">${waId}</td>
+        <td>${actions}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e.message}</td></tr>`;
+  }
+}
+
+async function deleteShift(shiftId) {
+  if (!confirm('Delete this shift? It must have 0 events.')) return;
+  try {
+    await API(`/api/shifts/${shiftId}/delete`, { method: 'POST' });
+    loadShiftEvents();
+    loadShiftsForSelects();
+  } catch(e) {
+    alert(e.message);
+  }
+}
+
+async function openMergeShifts() {
+  const srcId = prompt('Enter source shift ID to merge from:');
+  if (!srcId) return;
+  const dstId = prompt('Enter destination shift ID to merge into:');
+  if (!dstId) return;
+  if (!confirm(`Merge shift ${srcId} into ${dstId}?`)) return;
+  try {
+    await API(`/api/shifts/merge?src_shift_id=${srcId}&dst_shift_id=${dstId}`, { method: 'POST' });
+    loadShiftEvents();
+    loadShiftsForSelects();
+    alert('Shifts merged.');
+  } catch(e) {
+    alert(e.message);
+  }
+}
 
 const SOURCE_COLORS = {
   'LLM auto':           '#27500A',

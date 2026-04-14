@@ -702,3 +702,98 @@ def merge_trucks(req: MergeRequest):
         "aliases_added": result.get("aliases_added", []),
         "events_reassigned": result.get("events_reassigned", 0),
     }
+
+
+# ── Shift events ───────────────────────────────────────────────
+
+
+@router.get("/api/shift-events")
+def list_shift_events(
+    shift_id: str = Query(""),
+):
+    """List shift events (SHIFT_START/SHIFT_END) for the UI."""
+    with db.db_conn(DB_PATH) as conn:
+        if shift_id:
+            rows = conn.execute(
+                """SELECT se.*, s.shift_name
+                   FROM shift_events se
+                   JOIN shifts s ON s.shift_id = se.shift_id
+                   WHERE se.shift_id = ?
+                   ORDER BY se.timestamp_iso""",
+                (shift_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT se.*, s.shift_name
+                   FROM shift_events se
+                   JOIN shifts s ON s.shift_id = se.shift_id
+                   ORDER BY se.timestamp_iso DESC
+                   LIMIT 100""",
+            ).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@router.post("/api/shifts/{shift_id}/delete")
+def delete_shift(shift_id: str):
+    """Delete a shift if it has 0 events. Merges with previous shift."""
+    with db.db_conn(DB_PATH) as conn:
+        ev_count = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE shift_id=?",
+            (shift_id,),
+        ).fetchone()[0]
+        if ev_count > 0:
+            raise HTTPException(400, f"Shift has {ev_count} events, cannot delete")
+
+        shift = conn.execute(
+            "SELECT * FROM shifts WHERE shift_id=?", (shift_id,)
+        ).fetchone()
+        if not shift:
+            raise HTTPException(404, "Shift not found")
+
+        prev = conn.execute(
+            """SELECT * FROM shifts 
+               WHERE started_at < ? 
+               ORDER BY started_at DESC LIMIT 1""",
+            (shift["started_at"],),
+        ).fetchone()
+        if prev:
+            conn.execute(
+                "UPDATE events SET shift_id=? WHERE shift_id=?",
+                (prev["shift_id"], shift_id),
+            )
+            conn.execute(
+                "UPDATE shift_events SET shift_id=? WHERE shift_id=?",
+                (prev["shift_id"], shift_id),
+            )
+
+        conn.execute("DELETE FROM shifts WHERE shift_id=?", (shift_id,))
+        conn.execute("DELETE FROM shift_events WHERE shift_id=?", (shift_id,))
+
+    return {"deleted": True, "merged_into": prev["shift_id"] if prev else None}
+
+
+@router.post("/api/shifts/merge")
+def merge_shifts(src_shift_id: str, dst_shift_id: str):
+    """Merge src shift into dst shift (events + shift_events reassigned)."""
+    with db.db_conn(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE events SET shift_id=? WHERE shift_id=?",
+            (dst_shift_id, src_shift_id),
+        )
+        conn.execute(
+            "UPDATE shift_events SET shift_id=? WHERE shift_id=?",
+            (dst_shift_id, src_shift_id),
+        )
+        conn.execute(
+            "UPDATE shifts SET default_site_id=? WHERE shift_id=? AND default_site_id IS NULL",
+            (
+                conn.execute(
+                    "SELECT default_site_id FROM shifts WHERE shift_id=?",
+                    (dst_shift_id,),
+                ).fetchone()[0],
+                dst_shift_id,
+            ),
+        )
+        conn.execute("DELETE FROM shifts WHERE shift_id=?", (src_shift_id,))
+
+    return {"merged": True, "src": src_shift_id, "dst": dst_shift_id}
