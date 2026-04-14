@@ -739,6 +739,20 @@ tr:last-child td { border-bottom: none; }
         <tbody id="se-body"><tr><td colspan="6" class="loading-indicator">Loading…</td></tr></tbody>
       </table>
     </div>
+
+    <!-- Shifts Summary -->
+    <div style="margin-top:20px;padding-top:16px;border-top:0.5px solid var(--color-border-secondary)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h3 style="margin:0;font-size:13px;font-weight:600">Shifts</h3>
+        <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="loadShiftEvents()">Refresh</button>
+      </div>
+      <table id="shift-table" style="width:100%;table-layout:fixed;font-size:11px">
+        <thead><tr>
+          <th style="width:140px">Shift</th><th style="width:120px">Started</th><th style="width:100px">Ended</th><th style="width:60px">Events</th><th>Default Sites</th><th style="width:50px"></th>
+        </tr></thead>
+        <tbody id="shift-body"><tr><td colspan="6" class="loading-indicator">Loading…</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
   <!-- Add / Edit commit modal -->
@@ -1929,10 +1943,16 @@ const SE = { shiftId: '' };
 
 async function loadShiftEvents() {
   const tbody = document.getElementById('se-body');
+  const shiftBody = document.getElementById('shift-body');
   tbody.innerHTML = '<tr><td colspan="6" class="loading-indicator">Loading…</td></tr>';
+  shiftBody.innerHTML = '<tr><td colspan="6" class="loading-indicator">Loading…</td></tr>';
   try {
     const params = SE.shiftId ? `shift_id=${SE.shiftId}` : '';
     const d = await API(`/api/shift-events${params ? '?'+params : ''}`);
+    const allShifts = await API('/analytics/shifts');
+    const shifts = allShifts.shifts || [];
+    const shiftMap = {};
+    shifts.forEach(s => shiftMap[s.shift_id] = s);
     if (!d.items || !d.items.length) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No shift events</td></tr>';
       return;
@@ -1945,20 +1965,43 @@ async function loadShiftEvents() {
         ? '<span class="dot green" style="margin-right:3px"></span>Committed'
         : '<span class="dot red" style="margin-right:3px"></span>Deleted';
       const waId = ev.wa_message_id ? `${ev.wa_message_id.slice(0,12)}…` : '–';
-      const actions = ev.commit_status === 'COMMITTED'
-        ? `<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:var(--color-status-held)" onclick="deleteShift('${ev.shift_id}')">Del</button>`
-        : '';
+      const shiftInfo = shiftMap[ev.shift_id] || {};
       return `<tr>
-        <td style="font-weight:500">${escHtml(ev.shift_name)}</td>
+        <td style="font-weight:500">${escHtml(shiftInfo.shift_name || ev.shift_id)}</td>
         <td>${statusBadge}</td>
         <td style="color:var(--color-text-secondary)">${fmtTime(ev.timestamp_iso)}</td>
         <td>${stateBadge}</td>
         <td style="font-size:10px;font-family:var(--font-mono)">${waId}</td>
-        <td>${actions}</td>
+        <td></td>
       </tr>`;
     }).join('');
+
+    // Render shifts table
+    for (let i = shifts.length - 1; i >= 0; i--) {
+      const s = shifts[i];
+      const evCount = s.event_count || 0;
+      const canDelete = evCount === 0;
+      const startTime = s.started_at ? formatIST(s.started_at) : '–';
+      const endTime = s.ended_at ? formatIST(s.ended_at) : 'active';
+      const sites = s.default_sites?.length ? s.default_sites.join(', ') : '–';
+      const delBtn = canDelete
+        ? `<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:var(--color-status-held)" onclick="deleteShift('${s.shift_id}')" title="Delete shift (0 events)">Del</button>`
+        : `<span style="font-size:10px;color:var(--color-text-secondary)">${evCount} ev</span>`;
+      const row = document.createElement('tr');
+      row.innerHTML = `<td style="font-weight:500">${escHtml(s.shift_name)}</td>
+        <td>${startTime}</td>
+        <td>${endTime}</td>
+        <td>${evCount}</td>
+        <td>${escHtml(sites)}</td>
+        <td>${delBtn}</td>`;
+      shiftBody.appendChild(row);
+    }
+    if (!shifts.length) {
+      shiftBody.innerHTML = '<tr><td colspan="6" class="empty-state">No shifts</td></tr>';
+    }
   } catch(e) {
     tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e.message}</td></tr>`;
+    shiftBody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e.message}</td></tr>`;
   }
 }
 
@@ -1974,18 +2017,73 @@ async function deleteShift(shiftId) {
 }
 
 async function openMergeShifts() {
-  const srcId = prompt('Enter source shift ID to merge from:');
-  if (!srcId) return;
-  const dstId = prompt('Enter destination shift ID to merge into:');
-  if (!dstId) return;
-  if (!confirm(`Merge shift ${srcId} into ${dstId}?`)) return;
   try {
-    await API(`/api/shifts/merge?src_shift_id=${srcId}&dst_shift_id=${dstId}`, { method: 'POST' });
-    loadShiftEvents();
-    loadShiftsForSelects();
-    alert('Shifts merged.');
+    const d = await API('/analytics/shifts');
+    const shifts = d.shifts || [];
+    if (shifts.length < 2) {
+      alert('Need at least 2 shifts to merge.');
+      return;
+    }
+    let html = `<div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-primary);border-radius:var(--border-radius-lg);padding:20px;width:320px;max-width:95vw">
+      <h3 style="margin:0 0 16px;font-size:14px;font-weight:600">Merge Shifts</h3>
+      <div style="display:grid;gap:10px;font-size:12px">
+        <label>From (source) shift to merge:
+          <select id="merge-src" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary)">
+            ${shifts.map(s => `<option value="${s.shift_id}">${s.shift_name} (${s.started_at ? formatIST(s.started_at) : '?'}–${s.ended_at ? formatIST(s.ended_at) : 'active'})</option>`).join('')}
+          </select>
+        </label>
+        <label>Into (destination) shift:
+          <select id="merge-dst" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary)">
+            ${shifts.map(s => `<option value="${s.shift_id}">${s.shift_name} (${s.started_at ? formatIST(s.started_at) : '?'}–${s.ended_at ? formatIST(s.ended_at) : 'active'})</option>`).join('')}
+          </select>
+        </label>
+        <div id="merge-error" style="color:var(--color-status-held);font-size:11px;display:none"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+          <button class="btn-secondary" style="font-size:11px;padding:6px 12px" onclick="document.getElementById('merge-modal').style.display='none'">Cancel</button>
+          <button class="btn-primary" style="font-size:11px;padding:6px 12px" onclick="doMergeShifts()">Merge</button>
+        </div>
+      </div>
+    </div>`;
+    const modal = document.getElementById('merge-modal') || createModal('merge-modal');
+    modal.innerHTML = html;
+    modal.style.display = 'flex';
   } catch(e) {
     alert(e.message);
+  }
+}
+
+function createModal(id) {
+  const el = document.createElement('div');
+  el.id = id;
+  el.style = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:999;display:flex;align-items:center;justify-content:center';
+  document.body.appendChild(el);
+  return el;
+}
+
+async function doMergeShifts() {
+  const srcId = document.getElementById('merge-src').value;
+  const dstId = document.getElementById('merge-dst').value;
+  const errEl = document.getElementById('merge-error');
+  errEl.style.display = 'none';
+  if (!srcId || !dstId) {
+    errEl.textContent = 'Select both shifts.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (srcId === dstId) {
+    errEl.textContent = 'Cannot merge into same shift.';
+    errEl.style.display = 'block';
+    return;
+  }
+  try {
+    await API(`/api/shifts/merge?src_shift_id=${srcId}&dst_shift_id=${dstId}`, { method: 'POST' });
+    document.getElementById('merge-modal').style.display = 'none';
+    loadShiftEvents();
+    populateShiftSelectors();
+    alert('Shifts merged.');
+  } catch(e) {
+    errEl.textContent = e.message;
+    errEl.style.display = 'block';
   }
 }
 

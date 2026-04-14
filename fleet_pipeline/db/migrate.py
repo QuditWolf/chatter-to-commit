@@ -76,6 +76,53 @@ def run_migrations(db_path: str = DB_PATH) -> None:
         )
         print("  + shift_events table created")
 
+        # Migrate existing shifts → shift_events
+        print("\n[MIGRATION] Creating shift_events for existing shifts...")
+        existing = conn.execute(
+            "SELECT shift_id, started_at, ended_at, default_site_id, default_site_ids FROM shifts"
+        ).fetchall()
+        imported = 0
+        for s in existing:
+            has_start = conn.execute(
+                "SELECT 1 FROM shift_events WHERE shift_id=? AND status='SHIFT_START'",
+                (s["shift_id"],),
+            ).fetchone()
+            if not has_start:
+                conn.execute(
+                    """INSERT INTO shift_events
+                       (shift_event_id, shift_id, status, timestamp_iso, commit_status, site_id, site_ids_json)
+                       VALUES (?, ?, 'SHIFT_START', ?, 'COMMITTED', ?, ?)""",
+                    (
+                        f"migrated_start_{s['shift_id']}",
+                        s["shift_id"],
+                        s["started_at"],
+                        s["default_site_id"],
+                        s["default_site_ids"],
+                    ),
+                )
+                imported += 1
+            if s["ended_at"]:
+                has_end = conn.execute(
+                    "SELECT 1 FROM shift_events WHERE shift_id=? AND status='SHIFT_END'",
+                    (s["shift_id"],),
+                ).fetchone()
+                if not has_end:
+                    conn.execute(
+                        """INSERT INTO shift_events
+                           (shift_event_id, shift_id, status, timestamp_iso, commit_status)
+                           VALUES (?, ?, 'SHIFT_END', ?, 'COMMITTED')""",
+                        (
+                            f"migrated_end_{s['shift_id']}",
+                            s["shift_id"],
+                            s["ended_at"],
+                        ),
+                    )
+                    imported += 1
+        if imported:
+            print(f"  + Created {imported} shift_events from existing shifts")
+        else:
+            print("  = No migration needed (shift_events already exist)")
+
         print("\n[hitl_queue] Adding new columns...")
         _add_column(conn, "hitl_queue", "wa_message_id", "TEXT")
 

@@ -730,7 +730,12 @@ def gantt_data(shift_id: str = Query("")):
             ).fetchone()
 
         if not shift_row:
-            return {"shift_id": None, "trucks": [], "shift_start": None, "shift_end": None}
+            return {
+                "shift_id": None,
+                "trucks": [],
+                "shift_start": None,
+                "shift_end": None,
+            }
 
         sid = shift_row["shift_id"]
         shift_start = shift_row["started_at"]
@@ -793,19 +798,26 @@ def gantt_data(shift_id: str = Query("")):
                GROUP BY ls.truck_id""",
             (sid,),
         ).fetchall()
-        avg_by_truck = {r["truck_id"]: {"avg_min": r["avg_min"], "cycles": r["cycles"]} for r in avg_rows}
+        avg_by_truck = {
+            r["truck_id"]: {"avg_min": r["avg_min"], "cycles": r["cycles"]}
+            for r in avg_rows
+        }
 
     trucks_out = []
-    for truck_id, evs in sorted(by_truck.items(), key=lambda x: truck_names.get(x[0], x[0])):
+    for truck_id, evs in sorted(
+        by_truck.items(), key=lambda x: truck_names.get(x[0], x[0])
+    ):
         cycles = _group_loading_cycles(evs)
         stats = avg_by_truck.get(truck_id, {"avg_min": None, "cycles": 0})
-        trucks_out.append({
-            "truck_id": truck_id,
-            "truck_name": truck_names.get(truck_id, truck_id),
-            "cycles": cycles,
-            "avg_min": stats["avg_min"],
-            "total_loads": stats["cycles"],
-        })
+        trucks_out.append(
+            {
+                "truck_id": truck_id,
+                "truck_name": truck_names.get(truck_id, truck_id),
+                "cycles": cycles,
+                "avg_min": stats["avg_min"],
+                "total_loads": stats["cycles"],
+            }
+        )
 
     return {
         "shift_id": sid,
@@ -821,9 +833,11 @@ def list_shifts():
     """All shifts ordered newest-first, for the shift selector."""
     with db_conn(DB_PATH) as conn:
         rows = conn.execute(
-            """SELECT shift_id, shift_number, shift_name, started_at, ended_at,
-                      default_site_id, default_site_ids
-               FROM shifts ORDER BY started_at DESC"""
+            """SELECT s.shift_id, s.shift_number, s.shift_name, s.started_at, s.ended_at,
+                      s.default_site_id, s.default_site_ids,
+                      (SELECT COUNT(*) FROM events e WHERE e.shift_id=s.shift_id 
+                       AND e.commit_status IN ('COMMITTED','FLAGGED')) as event_count
+               FROM shifts s ORDER BY s.started_at DESC"""
         ).fetchall()
         # Pre-fetch site display names for all referenced site_ids
         all_site_ids = set()
@@ -865,6 +879,7 @@ def list_shifts():
                 "ended_at": r["ended_at"],
                 "active": r["ended_at"] is None,
                 "default_sites": _resolve_site_names(r),
+                "event_count": r["event_count"],
             }
             for r in rows
         ]
