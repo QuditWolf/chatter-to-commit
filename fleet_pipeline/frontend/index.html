@@ -339,36 +339,51 @@ tr:last-child td { border-bottom: none; }
 
 /* ── Mobile responsiveness ──────────────────────────────────────────── */
 @media (max-width: 768px) {
-  .topbar { padding: 0 12px; gap: 0; }
-  .logo { font-size: 14px; margin-right: 16px; }
-  .nav-tab { padding: 0 10px; font-size: 12px; }
+  .topbar { padding: 0 12px; gap: 0; overflow-x: auto; }
+  .logo { font-size: 13px; margin-right: 10px; flex-shrink: 0; }
+  .nav-tab { padding: 0 8px; font-size: 11px; flex-shrink: 0; white-space: nowrap; }
   .live { display: none; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
   .section-row { grid-template-columns: 1fr; }
   .section-row.three { grid-template-columns: 1fr; }
-  .main { padding: 12px; gap: 12px; }
-  .kpi { padding: 12px; }
+  .main { padding: 10px; gap: 10px; }
+  .kpi { padding: 10px 12px; }
   .kpi-val { font-size: 22px; }
-  .card { padding: 12px; }
+  .card { padding: 10px 12px; }
   .site-panes { grid-template-columns: 1fr; }
   .site-pane + .site-pane { border-left: none; border-top: 0.5px solid var(--color-border-tertiary); }
+  /* All card tables scroll horizontally on mobile */
+  .card { overflow-x: hidden; }
+  .card > table, .card > div > table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; min-width: 400px; }
   table { font-size: 11px; }
-  th { padding: 4px 4px 6px; }
+  th { padding: 4px 4px 6px; white-space: nowrap; }
   td { padding: 5px 4px; }
+  /* Commits table has its own scrollable wrapper already */
+  #cl-table-wrap { overflow-x: auto; }
+  #cl-table { min-width: 600px; }
   .msg-row { grid-template-columns: 1fr; gap: 8px; }
   .raw-msg { font-size: 10px; }
   .slideout-panel { width: 100%; right: -100%; }
-  .filter-bar { flex-direction: column; }
+  .filter-bar { flex-direction: column; align-items: stretch; }
+  .filter-bar input, .filter-bar select, .filter-bar button { width: 100%; }
   .filter-bar input { width: 100%; }
   .nl-wrap { flex-direction: column; }
   #cl-search, #nl-input { min-width: unset; }
   .hitl-actions { flex-direction: column; }
-  .hitl-actions input { width: 100%; }
+  .hitl-actions input { width: 100%; min-height: 44px; }
+  .hitl-actions button { min-height: 44px; }
   .commits-table-scroll { overflow-x: auto; }
-  .card table { min-width: 600px; }
   .merge-controls select { width: 100%; }
   #commit-modal > div { width: 95vw; padding: 16px; }
   #login-overlay > div { width: 90vw; }
+  /* Touch-friendly buttons */
+  .btn, .btn-primary, .filter-btn, .correct-btn, .save-alias-btn, .page-btn {
+    min-height: 36px;
+  }
+  .nav-tab { min-height: 44px; }
+  /* Fleet table horizontal scroll */
+  #fleet-table-body { display: table-row-group; }
+  .card table { font-size: 11px; }
 }
 </style>
 </head>
@@ -487,7 +502,8 @@ tr:last-child td { border-bottom: none; }
   <!-- Fleet state table -->
   <div class="card">
     <div class="card-title">All trolleys — current state</div>
-    <table>
+    <div style="overflow-x:auto">
+    <table style="min-width:400px">
       <thead><tr>
         <th style="width:70px">Trolley</th>
         <th style="width:140px">Status</th>
@@ -499,6 +515,7 @@ tr:last-child td { border-bottom: none; }
         <tr><td colspan="5" class="loading-indicator">Loading…</td></tr>
       </tbody>
     </table>
+    </div>
   </div>
 
   <!-- System health -->
@@ -917,22 +934,43 @@ const API = async (path, opts={}) => {
 };
 
 const _IST = {timeZone: 'Asia/Kolkata'};
-const fmtTime = iso => {
+
+/**
+ * formatIST — canonical IST display helper.
+ * Returns "DD/MM HH:MM IST" for today's messages,
+ * or "DD/MM/YY HH:MM IST" for older messages.
+ */
+const formatIST = iso => {
   if(!iso) return '–';
   try {
+    // Timestamps from backend are already IST ISO strings (e.g. "2026-04-13T14:30:00+05:30")
+    // or UTC ISO strings — Date() handles both correctly; toLocale with IST tz displays right.
     const d = new Date(iso);
-    const time = d.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', hour12:false, ..._IST});
-    const nowDate = new Date().toLocaleDateString('en-CA', _IST);
-    const msgDate = d.toLocaleDateString('en-CA', _IST);
-    if(nowDate === msgDate) return time + ' IST';
-    const dateStr = d.toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric', ..._IST});
-    return `${dateStr} ${time} IST`;
+    if(isNaN(d.getTime())) return iso.slice(0,16)||'–';
+    const hhmm = d.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', hour12:false, ..._IST});
+    const todayStr = new Date().toLocaleDateString('en-CA', _IST); // "YYYY-MM-DD"
+    const msgStr   = d.toLocaleDateString('en-CA', _IST);
+    if(todayStr === msgStr) return hhmm + ' IST';
+    // Show DD/MM for same-year, DD/MM/YY otherwise
+    const day  = d.toLocaleDateString('en-IN', {day:'2-digit', ..._IST});
+    const mon  = d.toLocaleDateString('en-IN', {month:'2-digit', ..._IST});
+    return `${day}/${mon} ${hhmm} IST`;
   } catch{ return iso.slice(0,16)||'–'; }
 };
 
+// Alias — legacy callers use fmtTime; new code should prefer formatIST
+const fmtTime = formatIST;
+
 const fmtDate = iso => {
   if(!iso) return '–';
-  try { return new Date(iso).toLocaleDateString('en-IN', _IST) + ' IST'; }
+  try {
+    const d = new Date(iso);
+    if(isNaN(d.getTime())) return iso.slice(0,10)||'–';
+    const day  = d.toLocaleDateString('en-IN', {day:'2-digit', ..._IST});
+    const mon  = d.toLocaleDateString('en-IN', {month:'2-digit', ..._IST});
+    const yr   = d.toLocaleDateString('en-IN', {year:'2-digit', ..._IST});
+    return `${day}/${mon}/${yr} IST`;
+  }
   catch{ return iso.slice(0,10)||'–'; }
 };
 
@@ -1366,15 +1404,27 @@ async function refreshHITL() {
 async function resolveHITL(qid, action) {
   const el = document.getElementById('hitl-'+qid);
   if(action === 'answer') {
-    const ans = document.getElementById('ans-'+qid).value.trim();
+    const inputEl = document.getElementById('ans-'+qid);
+    const ans = (inputEl ? inputEl.value : '').trim();
     if(!ans) { alert('Enter a correction first.'); return; }
+    // Show loading state on the submit button — find it next to the input
+    const submitBtn = el ? el.querySelector('button[onclick*="answer"]') : null;
+    if(submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '…'; }
     try {
       await API(`/hitl/${qid}/answer`, {method:'POST', body: JSON.stringify({question_id: qid, answer: ans})});
-    } catch(e) { console.warn('Answer failed', e); }
+      // Only clear the stored answer after successful submission
+      delete S.hitlAnswers[qid];
+      if(el) el.classList.add('resolved');
+    } catch(e) {
+      // Restore button on failure so user can retry
+      if(submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Submit'; }
+      alert('Answer failed: ' + e.message);
+      return;
+    }
   } else {
     try { await API(`/hitl/${qid}/skip`, {method:'POST'}); } catch(e) {}
+    if(el) el.classList.add('resolved');
   }
-  if(el) el.classList.add('resolved');
   setTimeout(refreshHITL, 500);
 }
 
@@ -2071,7 +2121,8 @@ async function doMerge() {
       body: JSON.stringify({ src_id: srcId, dst_id: dstId }),
     });
     resEl.style.color = '#27500A';
-    resEl.textContent = `✅ Merged "${d.src_id}" → "${d.dst_id}". ${d.events_reassigned} events reassigned.`;
+    const aliasInfo = d.aliases_added && d.aliases_added.length ? ` Aliases added: ${d.aliases_added.join(', ')}.` : '';
+    resEl.textContent = `Merged ${d.src_id} → ${d.dst_id}: ${d.events_reassigned} events reassigned.${aliasInfo}`;
     document.getElementById('merge-src').value = '';
     document.getElementById('merge-dst').value = '';
     loadTruckRegistry();
