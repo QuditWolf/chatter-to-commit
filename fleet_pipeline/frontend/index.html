@@ -1940,6 +1940,8 @@ async function runNL() {
 const CL = { page: 1, totalPages: 1, search: '', searchTimer: null };
 const SE = { shiftId: '' };
 
+let _cachedShifts = [];
+
 async function loadShiftEvents() {
   const tbody = document.getElementById('se-body');
   const shiftBody = document.getElementById('shift-body');
@@ -1950,6 +1952,7 @@ async function loadShiftEvents() {
     const d = await API(`/api/shift-events${params ? '?'+params : ''}`);
     const allShifts = await API('/analytics/shifts');
     const shifts = allShifts.shifts || [];
+    _cachedShifts = shifts;
     const shiftMap = {};
     shifts.forEach(s => shiftMap[s.shift_id] = s);
     if (!d.items || !d.items.length) {
@@ -1983,8 +1986,8 @@ async function loadShiftEvents() {
       const startTime = s.started_at ? formatIST(s.started_at) : '–';
       const endTime = s.ended_at ? formatIST(s.ended_at) : 'active';
       const sites = s.default_sites?.length ? s.default_sites.join(', ') : '–';
-      // Only offer merge if there's a later shift to merge INTO
-      const canMerge = i < shifts.length - 1;
+      // Only offer merge if there's an older shift below (i > 0 since table renders newest-first)
+      const canMerge = i > 0;
       const actions = [];
       if (canMerge) {
         actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px" onclick="mergeShiftInto('${s.shift_id}')" title="Merge into shift below">Merge↓</button>`);
@@ -2024,13 +2027,14 @@ async function deleteShift(shiftId) {
 }
 
 async function mergeShiftInto(srcShiftId) {
-  const shifts = S.shifts || [];
+  const shifts = _cachedShifts;
   const srcIdx = shifts.findIndex(s => s.shift_id === srcShiftId);
-  if (srcIdx < 0 || srcIdx >= shifts.length - 1) {
+  // Table renders newest-first (reverse order), so "below" = lower index = older shift
+  if (srcIdx < 0 || srcIdx === 0) {
     alert('No shift below to merge into.');
     return;
   }
-  const dstShift = shifts[srcIdx + 1];
+  const dstShift = shifts[srcIdx - 1];
   if (!confirm(`Merge ${shifts[srcIdx].shift_name} into ${dstShift.shift_name}?`)) return;
   try {
     await API(`/api/shifts/merge?src_shift_id=${srcShiftId}&dst_shift_id=${dstShift.shift_id}`, { method: 'POST' });
