@@ -638,7 +638,9 @@ async def _handle_control_message(
             # After ending a shift via WA signal: close open cycles, then post summary
             if signal == "end" and new_shift:
                 try:
-                    from fleet_pipeline.pipeline.committer import close_open_cycles_at_shift_end
+                    from fleet_pipeline.pipeline.committer import (
+                        close_open_cycles_at_shift_end,
+                    )
                     from fleet_pipeline.pipeline.wa_notifier import _resolve_group_jid
 
                     _cyc_jid = _resolve_group_jid(ctrl_jid)
@@ -698,9 +700,25 @@ async def _handle_control_message(
                 )
             return
 
+    # ── List shifts request ─────────────────────────────────────────────────────
+    # Syntax: list shifts / show shifts / shifts
+    _LIST_SHIFTS_RE = re.compile(
+        r"^\s*(list\s+shifts?|show\s+shifts?|shifts)\s*$", re.I
+    )
+    if _LIST_SHIFTS_RE.match(text):
+        log.info("[CTRL] List shifts request — posting shift list to group")
+        try:
+            from fleet_pipeline.pipeline.wa_notifier import send_shift_list
+
+            send_shift_list(group_jid, DB_PATH)
+        except Exception as exc:
+            log.warning("List shifts failed: %s", exc)
+        return
+
     # ── Summary request ───────────────────────────────────────────────────────
     # Note: bare "total" or "count" removed to avoid triggering on bot's own
     # summary messages (which contain "Total Trolleys Loaded = N").
+    # Syntax: summary / summary _03 / summary 2026-04-15_03
     _SUMMARY_RE = [
         re.compile(r"\b(summary|sumary|summery)\b", re.I),
         re.compile(r"\bsend\s+(report|summary)\b", re.I),
@@ -711,11 +729,30 @@ async def _handle_control_message(
     ]
     for pat in _SUMMARY_RE:
         if pat.search(text):
+            shift_id = None
+            # Try to extract shift specifier: "_03" or "2026-04-15_03"
+            _SHIFT_SPEC_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})?(_\d+)\b")
+            m = _SHIFT_SPEC_RE.search(text)
+            if m:
+                date_part = m.group(1)  # e.g. "2026-04-15" or None
+                suffix_part = m.group(2)  # e.g. "_03"
+                if date_part:
+                    shift_id = f"{date_part}{suffix_part}"
+                else:
+                    # Try to find today's shift with this suffix
+                    import sqlite3 as _sq
+                    from datetime import datetime
+                    import pytz
+
+                    _IST = pytz.timezone("Asia/Kolkata")
+                    today = datetime.now(_IST).strftime("%Y-%m-%d")
+                    shift_id = f"{today}{suffix_part}"
             log.info(
-                "[CTRL] Summary request matched — sending on-demand summary to group"
+                "[CTRL] Summary request matched (shift_id=%s) — sending on-demand summary to group",
+                shift_id,
             )
             try:
-                send_summary_to_group(group_jid, DB_PATH)
+                send_summary_to_group(group_jid, DB_PATH, shift_id=shift_id)
             except Exception as exc:
                 log.warning("On-demand summary failed: %s", exc)
             return

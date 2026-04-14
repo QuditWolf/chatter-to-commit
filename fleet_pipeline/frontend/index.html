@@ -2742,7 +2742,8 @@ async function populateShiftSelectors() {
       shifts.forEach(sh => {
         const start = sh.started_at ? formatIST(sh.started_at) : '–';
         const end   = sh.ended_at   ? formatIST(sh.ended_at)   : 'active';
-        const label = `${sh.shift_name} · ${start}–${end}`;
+        const ev    = sh.event_count || 0;
+        const label = `${sh.shift_name} · ${start}–${end} (${ev} events)`;
         dashSel.add(new Option(label, sh.shift_id));
       });
     }
@@ -2755,7 +2756,8 @@ async function populateShiftSelectors() {
         const start = sh.started_at ? formatIST(sh.started_at) : '–';
         const end   = sh.ended_at   ? formatIST(sh.ended_at)   : 'active';
         const sites = sh.default_sites?.length ? ' · ' + sh.default_sites.join(', ') : '';
-        const label = `${sh.shift_name} · ${start}–${end}${sites}`;
+        const ev    = sh.event_count || 0;
+        const label = `${sh.shift_name} · ${start}–${end}${sites} (${ev} events)`;
         clSel.add(new Option(label, sh.shift_id));
       });
     }
@@ -2770,7 +2772,8 @@ async function populateShiftSelectors() {
         const start = sh.started_at ? formatIST(sh.started_at) : '–';
         const end   = sh.ended_at   ? formatIST(sh.ended_at)   : 'active';
         const sites = sh.default_sites && sh.default_sites.length ? ' · ' + sh.default_sites.join(', ') : '';
-        const label = `${sh.shift_name} · ${start}–${end}${sites}`;
+        const ev    = sh.event_count || 0;
+        const label = `${sh.shift_name} · ${start}–${end}${sites} (${ev} events)`;
         msgSel.add(new Option(label, sh.shift_id));
         if (sh.active) activeShiftId = sh.shift_id;
       });

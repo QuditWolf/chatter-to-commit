@@ -241,9 +241,92 @@ def notify_hitl_questions(
             )
 
 
-def send_summary_to_group(group_jid: str, db_path: str) -> None:
+def send_shift_list(group_jid: str, db_path: str) -> None:
     """
-    Generate the current shift summary and post it to the control group.
+    Post a listing of today's and yesterday's shifts (with event counts) to the group.
+    Format:
+      ── Shifts ──
+      📅 Today (2026-04-15):
+        _01  active  45 events
+        _02  10:30–12:45  23 events
+      📅 Yesterday (2026-04-14):
+        _03  08:00–11:30  67 events
+    """
+    group_jid = _resolve_group_jid(group_jid)
+    if not group_jid:
+        return
+
+    import sqlite3
+    import pytz
+    from datetime import datetime, timedelta, timezone
+
+    _IST = pytz.timezone("Asia/Kolkata")
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            now_ist = datetime.now(_IST)
+            today_str = now_ist.strftime("%Y-%m-%d")
+            yest_str = (now_ist - timedelta(days=1)).strftime("%Y-%m-%d")
+
+            rows = conn.execute(
+                """SELECT s.shift_name, s.started_at, s.ended_at, s.is_deleted,
+                          (SELECT COUNT(*) FROM events e
+                           WHERE e.shift_id=s.shift_id
+                             AND e.commit_status IN ('COMMITTED','FLAGGED')) AS event_count
+                     FROM shifts s
+                     WHERE (s.shift_name LIKE ? OR s.shift_name LIKE ?)
+                     ORDER BY s.started_at ASC""",
+                (f"{today_str}_%", f"{yest_str}_%"),
+            ).fetchall()
+
+        def _fmt_time(iso: str) -> str:
+            if not iso:
+                return "?"
+            try:
+                dt = datetime.fromisoformat(iso)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(_IST).strftime("%H:%M")
+            except Exception:
+                return "?"
+
+        today_rows = [r for r in rows if r["shift_name"].startswith(today_str)]
+        yest_rows = [r for r in rows if r["shift_name"].startswith(yest_str)]
+
+        lines = ["\u2500\u2500 Shifts \u2500\u2500"]
+        for label, day_rows, day_str in [
+            (f"\U0001f4c5 Today ({today_str})", today_rows, today_str),
+            (f"\U0001f4c5 Yesterday ({yest_str})", yest_rows, yest_str),
+        ]:
+            if not day_rows:
+                continue
+            lines.append(label + ":")
+            for r in day_rows:
+                suffix = r["shift_name"][len(day_str) :]  # e.g. "_01"
+                start_t = _fmt_time(r["started_at"])
+                end_t = "active" if not r["ended_at"] else _fmt_time(r["ended_at"])
+                ev = r["event_count"]
+                deleted_mark = " (deleted)" if r["is_deleted"] else ""
+                lines.append(
+                    f"  {suffix}  {start_t}–{end_t}  {ev} events{deleted_mark}"
+                )
+
+        if len(lines) == 1:
+            lines.append("No shifts today or yesterday.")
+
+        _post_send_message(group_jid, "\n".join(lines))
+        log.info("wa_notifier: posted shift list to group %s", group_jid)
+    except Exception as exc:
+        log.warning("send_shift_list: error: %s", exc)
+        _post_send_message(group_jid, f"Error listing shifts: {str(exc)[:80]}")
+
+
+def send_summary_to_group(group_jid: str, db_path: str, shift_id: str = None) -> None:
+    """
+    Generate a shift summary and post it to the control group.
+    If shift_id is given, summarise that specific shift; otherwise use the
+    active shift (or last non-deleted shift as fallback).
     Format:
       ── 2026-04-12_06 summary ──
       Total Trolleys Loaded (all sites) = N
@@ -263,21 +346,30 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
 
-            shift = conn.execute(
-                """SELECT shift_id, shift_number, shift_name
-                   FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0)
-                   ORDER BY started_at DESC LIMIT 1"""
-            ).fetchone()
-
             is_last = False
-            if not shift:
-                # No active shift - get the last non-deleted shift
+            if shift_id:
                 shift = conn.execute(
-                    """SELECT shift_id, shift_number, shift_name, ended_at
-                       FROM shifts WHERE (is_deleted IS NULL OR is_deleted = 0)
+                    "SELECT shift_id, shift_number, shift_name, ended_at FROM shifts WHERE shift_id=? AND (is_deleted IS NULL OR is_deleted = 0)",
+                    (shift_id,),
+                ).fetchone()
+                if not shift:
+                    _post_send_message(group_jid, f"Shift not found: {shift_id}")
+                    return
+            else:
+                shift = conn.execute(
+                    """SELECT shift_id, shift_number, shift_name
+                       FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0)
                        ORDER BY started_at DESC LIMIT 1"""
                 ).fetchone()
-                is_last = True
+
+                if not shift:
+                    # No active shift - get the last non-deleted shift
+                    shift = conn.execute(
+                        """SELECT shift_id, shift_number, shift_name, ended_at
+                           FROM shifts WHERE (is_deleted IS NULL OR is_deleted = 0)
+                           ORDER BY started_at DESC LIMIT 1"""
+                    ).fetchone()
+                    is_last = True
 
             if not shift:
                 text = "No shift found."
