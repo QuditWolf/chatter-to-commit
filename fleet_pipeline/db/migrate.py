@@ -45,11 +45,14 @@ def run_migrations(db_path: str = DB_PATH) -> None:
         _add_column(conn, "events", "corrected_at", "TIMESTAMP")
         _add_column(conn, "events", "shift_id", "TEXT")
         _add_column(conn, "events", "timestamp_approximate", "BOOLEAN DEFAULT FALSE")
+        _add_column(conn, "events", "commit_notif_bot_msg_id", "TEXT")
 
         print("\n[shifts] Adding new columns...")
         _add_column(conn, "shifts", "shift_name", "TEXT")
         _add_column(conn, "shifts", "default_site_id", "TEXT")
         _add_column(conn, "shifts", "default_site_ids", "TEXT")
+        _add_column(conn, "shifts", "start_notif_bot_msg_id", "TEXT")
+        _add_column(conn, "shifts", "end_notif_bot_msg_id", "TEXT")
 
         print("\n[hitl_queue] Adding new columns...")
         _add_column(conn, "hitl_queue", "wa_message_id", "TEXT")

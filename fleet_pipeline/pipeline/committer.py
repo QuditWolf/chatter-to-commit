@@ -371,6 +371,22 @@ class Committer:
             # Deleted messages: original text is unrecoverable — no HITL question created
             # since there is no context for a human to act on.
 
+        # Send WA commit notifications (after DB commit, separate connection)
+        for notif_ev in summary.pop("_commit_notifications", []):
+            if self.group_jid:
+                try:
+                    from fleet_pipeline.pipeline.wa_notifier import (
+                        send_commit_notification,
+                        _resolve_group_jid,
+                    )
+                    from fleet_pipeline.config import WA_CONTROL_GROUP_JID
+
+                    notify_jid = _resolve_group_jid(WA_CONTROL_GROUP_JID or self.group_jid)
+                    if notify_jid:
+                        send_commit_notification(notif_ev, notify_jid, self.db_path)
+                except Exception as _exc:
+                    log.warning("Failed to send commit notification: %s", _exc)
+
         # Send WA notifications for auto-created trucks (after DB commit)
         for new_truck_id, alias in summary.pop("_new_trucks", []):
             if self.group_jid:
@@ -646,6 +662,13 @@ class Committer:
         reply_context=None,
     ):
         events = level3_result.get("events", []) or []
+        # Message metadata for commit notifications
+        _msg_timestamp_iso = level3_result.get("raw_message", {}).get("timestamp_iso", "")
+        try:
+            _msg_timestamp_ist = to_ist(_msg_timestamp_iso) if _msg_timestamp_iso else ""
+        except Exception:
+            _msg_timestamp_ist = ""
+        _msg_sender = level3_result.get("raw_message", {}).get("sender_name", "") or self.sender_id or ""
 
         # Pre-validate all truck_id/site_id values in the LLM output once.
         # Any ID not present in the DB is nulled out so downstream logic
@@ -1023,6 +1046,29 @@ class Committer:
                 new_value={"commit_status": event_commit_status},
             )
 
+            # Queue WA notification for inferred or low-confidence committed events.
+            # Sent after the DB transaction closes (separate connection).
+            if (
+                event_commit_status == "COMMITTED"
+                and (ev_confidence < 0.85 or ev.get("inferred"))
+                and not self.simulation_run_id
+            ):
+                summary.setdefault("_commit_notifications", []).append(
+                    {
+                        "event_id": event_id,
+                        "truck_id": truck_id,
+                        "truck_alias": truck_alias,
+                        "site_id": site_id,
+                        "site_alias": site_alias,
+                        "status": status,
+                        "confidence": ev_confidence,
+                        "inferred": ev.get("inferred", False),
+                        "raw_text": raw_text,
+                        "timestamp_ist": _msg_timestamp_ist,
+                        "sender_name": _msg_sender,
+                    }
+                )
+
             _inferred_tag = " [inferred]" if ev.get("inferred") else ""
             log.info(
                 "[%s] %s %s → @%s  conf=%.2f%s",
@@ -1180,28 +1226,10 @@ class Committer:
             questions.append(("UNKNOWN_SITE", {}))
             return "FLAGGED", questions
 
-        # Use ev_confidence for threshold checks — it reflects the actual event-level
-        # confidence including post-LLM corrections like site inference from sender history.
-        effective_confidence = (
-            ev_confidence if ev_confidence > 0 else overall_confidence
-        )
-
-        # Low confidence → FLAGGED + LOW_CONFIDENCE HITL for review
-        if effective_confidence < thresholds["HOLD"]:
-            questions.append(("LOW_CONFIDENCE", {}))
-            return "FLAGGED", questions
-
-        # Mid confidence range
-        if effective_confidence < thresholds["AUTO_COMMIT"]:
-            if commit_rec == "HOLD":
-                # LLM recommends hold — flag for review, add LOW_CONFIDENCE HITL
-                questions.append(("LOW_CONFIDENCE", {}))
-            return "FLAGGED", questions
-
-        # High confidence (>= AUTO_COMMIT)
-        if site_id is None and status in SITE_REQUIRED_STATUSES:
-            return "FLAGGED", questions
-
+        # Everything with truck_id + site_id → COMMITTED immediately.
+        # Inferred or low-confidence events are flagged via WA control group notification
+        # ("I committed X (inferred/conf 72%) — reply to correct") rather than gating
+        # the commit behind HITL confirmation.
         return "COMMITTED", questions
 
     def _handle_tally(self, conn, level3_result, msg_id, summary):

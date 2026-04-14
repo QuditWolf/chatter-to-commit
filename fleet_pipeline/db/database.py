@@ -835,12 +835,32 @@ def get_messages_page(
         msg_ids,
     ).fetchall()
 
+    # Fetch answered HITL questions for the events on this page
+    event_ids = [ev["event_id"] for ev in event_rows if ev["event_id"]]
+    hitl_by_event: Dict[str, list] = {}
+    if event_ids:
+        ph2 = ",".join("?" * len(event_ids))
+        hitl_rows = conn.execute(
+            f"""SELECT event_id, question_type, answer, answered_at, answered_by
+                FROM hitl_queue
+                WHERE event_id IN ({ph2}) AND status='ANSWERED' AND answer IS NOT NULL
+                ORDER BY answered_at ASC""",
+            event_ids,
+        ).fetchall()
+        for hr in hitl_rows:
+            eid = hr["event_id"]
+            if eid not in hitl_by_event:
+                hitl_by_event[eid] = []
+            hitl_by_event[eid].append(dict(hr))
+
     events_by_msg: Dict[str, list] = {}
     for ev in event_rows:
         mid = ev["msg_id"]
         if mid not in events_by_msg:
             events_by_msg[mid] = []
-        events_by_msg[mid].append(dict(ev))
+        ev_dict = dict(ev)
+        ev_dict["hitl_answers"] = hitl_by_event.get(ev["event_id"], [])
+        events_by_msg[mid].append(ev_dict)
 
     items = []
     for r in msg_rows:

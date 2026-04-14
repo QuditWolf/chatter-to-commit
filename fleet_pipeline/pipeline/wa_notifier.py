@@ -358,6 +358,175 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
     log.info("wa_notifier: posted shift summary to group %s", group_jid)
 
 
+def send_shift_notification(
+    shift: dict,
+    action: str,
+    group_jid: str,
+    db_path: str,
+) -> None:
+    """
+    Send a WhatsApp notification to the control group when a shift starts, ends, or is resumed.
+
+    action: 'start' | 'end' | 'resume'
+    shift: dict with at least shift_id, shift_name, default_site_id, default_site_ids
+
+    Stores the returned bot_message_id in shifts.start_notif_bot_msg_id or
+    shifts.end_notif_bot_msg_id so that WA replies can be routed back as
+    shift control actions (e.g. "no end" → resume).
+    """
+    group_jid = _resolve_group_jid(group_jid)
+    if not group_jid:
+        return
+
+    shift_name = shift.get("shift_name") or "?"
+    shift_id = shift.get("shift_id")
+
+    # Resolve default site display names
+    site_names: list = []
+    try:
+        import sqlite3 as _sqlite3
+        import json as _json
+
+        site_ids: list = []
+        raw_ids = shift.get("default_site_ids")
+        if raw_ids:
+            try:
+                site_ids = _json.loads(raw_ids) if isinstance(raw_ids, str) else raw_ids
+            except Exception:
+                pass
+        if not site_ids and shift.get("default_site_id"):
+            site_ids = [shift["default_site_id"]]
+
+        if site_ids:
+            with _sqlite3.connect(db_path) as _conn:
+                _conn.row_factory = _sqlite3.Row
+                for sid in site_ids:
+                    row = _conn.execute(
+                        "SELECT display_name FROM sites WHERE site_id=?", (sid,)
+                    ).fetchone()
+                    site_names.append(row["display_name"] if row else sid)
+    except Exception as exc:
+        log.warning("send_shift_notification: could not resolve site names: %s", exc)
+
+    site_line = f"\n📍 Default site: {', '.join(site_names)}" if site_names else ""
+
+    if action == "start":
+        text = (
+            f"🟢 *Shift {shift_name} started*{site_line}\n\n"
+            f"Reply _no start_ to cancel  |  _resume_ to resume previous shift instead"
+        )
+        col = "start_notif_bot_msg_id"
+    elif action == "end":
+        text = (
+            f"🔴 *Shift {shift_name} ended*\n\n"
+            f"Reply _no end_ or _resume_ to continue this shift"
+        )
+        col = "end_notif_bot_msg_id"
+    elif action == "resume":
+        text = f"↩ *Shift {shift_name} resumed*{site_line}"
+        col = "start_notif_bot_msg_id"
+    else:
+        return
+
+    bot_msg_id = _post_send_message(group_jid, text)
+    if bot_msg_id and shift_id:
+        try:
+            import sqlite3 as _sqlite3
+
+            with _sqlite3.connect(db_path) as _conn:
+                _conn.execute(
+                    f"UPDATE shifts SET {col}=? WHERE shift_id=?",
+                    (bot_msg_id, shift_id),
+                )
+                _conn.commit()
+        except Exception as exc:
+            log.warning(
+                "send_shift_notification: could not store bot_msg_id: %s", exc
+            )
+
+
+def send_commit_notification(event: dict, group_jid: str, db_path: str) -> None:
+    """
+    Send a WA notification to the control group when an event is auto-committed
+    with inferred data or low confidence.  Stores bot_message_id in
+    events.commit_notif_bot_msg_id so that operator replies can be routed
+    back as corrections.
+    """
+    group_jid = _resolve_group_jid(group_jid)
+    if not group_jid:
+        return
+
+    truck = event.get("truck_alias") or event.get("truck_id") or "?"
+    status = event.get("status", "?")
+    site = event.get("site_alias") or event.get("site_id") or "?"
+    conf = event.get("confidence", 0)
+    pct = f"{int(conf * 100)}%"
+    event_id = event.get("event_id", "")
+
+    tags = []
+    if event.get("inferred"):
+        tags.append("inferred")
+    if conf < 0.85:
+        tags.append(f"conf {pct}")
+    tag_str = " · ".join(tags)
+
+    # Original message context
+    raw_text = (event.get("raw_text") or "").strip()
+    timestamp_ist = (event.get("timestamp_ist") or "").strip()
+    sender = (event.get("sender_name") or "").strip()
+    msg_line = f'\n_Msg: "{raw_text[:80]}"_' if raw_text else ""
+    meta_parts = [p for p in (timestamp_ist, sender) if p]
+    meta_line = f"\n_{' \u00b7 '.join(meta_parts)}_" if meta_parts else ""
+
+    text = (
+        f"\u2705 Committed _{tag_str}_: *{truck} {status}* @ {site}"
+        f"{msg_line}{meta_line}\n"
+        f"Reply to correct or clarify"
+    )
+
+    bot_msg_id = _post_send_message(group_jid, text)
+    if bot_msg_id and event_id:
+        try:
+            import sqlite3 as _sqlite3
+
+            with _sqlite3.connect(db_path) as _conn:
+                _conn.execute(
+                    "UPDATE events SET commit_notif_bot_msg_id=? WHERE event_id=?",
+                    (bot_msg_id, event_id),
+                )
+                _conn.commit()
+        except Exception as exc:
+            log.warning("send_commit_notification: could not store bot_msg_id: %s", exc)
+
+
+def send_deletion_notification(
+    wa_message_id: str,
+    raw_text: str,
+    timestamp_ist: str,
+    sender_name: str,
+    events_deleted: int,
+    group_jid: str,
+) -> None:
+    """
+    Send a WA notification to the control group when a fleet message is recalled
+    and its committed/flagged events are deleted from the state.
+    """
+    group_jid = _resolve_group_jid(group_jid)
+    if not group_jid:
+        return
+
+    msg_preview = (raw_text or "").strip()[:80] or "(unknown)"
+    meta_parts = [p for p in (timestamp_ist, sender_name) if p]
+    meta_line = f"\n_{' \u00b7 '.join(meta_parts)}_" if meta_parts else ""
+
+    text = (
+        f"\U0001f5d1 *Message deleted* \u2014 {events_deleted} event(s) removed\n"
+        f'_Msg: "{msg_preview}"_{meta_line}\n'
+        f"_(WA ID: {wa_message_id[:16]}\u2026)_"
+    )
+    _post_send_message(group_jid, text)
+
+
 def _post_send_message(group_jid: str, text: str) -> Optional[str]:
     """POST to Node.js /send-message. Returns bot_message_id or None on failure.
     Hard-blocks any attempt to send to the fleet (read-only) group.

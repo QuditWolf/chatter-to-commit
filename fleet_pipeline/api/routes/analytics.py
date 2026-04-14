@@ -821,8 +821,40 @@ def list_shifts():
     """All shifts ordered newest-first, for the shift selector."""
     with db_conn(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT shift_id, shift_number, shift_name, started_at, ended_at FROM shifts ORDER BY started_at DESC"
+            """SELECT shift_id, shift_number, shift_name, started_at, ended_at,
+                      default_site_id, default_site_ids
+               FROM shifts ORDER BY started_at DESC"""
         ).fetchall()
+        # Pre-fetch site display names for all referenced site_ids
+        all_site_ids = set()
+        for r in rows:
+            if r["default_site_id"]:
+                all_site_ids.add(r["default_site_id"])
+            if r["default_site_ids"]:
+                try:
+                    for sid in json.loads(r["default_site_ids"]):
+                        all_site_ids.add(sid)
+                except Exception:
+                    pass
+        site_names: dict = {}
+        if all_site_ids:
+            for sid in all_site_ids:
+                sr = conn.execute(
+                    "SELECT display_name FROM sites WHERE site_id=?", (sid,)
+                ).fetchone()
+                site_names[sid] = sr["display_name"] if sr else sid
+
+    def _resolve_site_names(row) -> list:
+        ids: list = []
+        if row["default_site_ids"]:
+            try:
+                ids = json.loads(row["default_site_ids"])
+            except Exception:
+                pass
+        if not ids and row["default_site_id"]:
+            ids = [row["default_site_id"]]
+        return [site_names.get(sid, sid) for sid in ids]
+
     return {
         "shifts": [
             {
@@ -832,6 +864,7 @@ def list_shifts():
                 "started_at": r["started_at"],
                 "ended_at": r["ended_at"],
                 "active": r["ended_at"] is None,
+                "default_sites": _resolve_site_names(r),
             }
             for r in rows
         ]

@@ -611,6 +611,10 @@ tr:last-child td { border-bottom: none; }
       <button class="btn" onclick="shiftAction('resume')" id="shift-btn-resume">↩ Resume last</button>
     </div>
     <div id="shift-ctrl-msg" style="margin-top:8px;font-size:12px;color:var(--color-text-secondary)"></div>
+    <div id="shift-ctrl-info" style="margin-top:8px;font-size:11px;color:var(--color-text-secondary);display:none">
+      <span id="shift-ctrl-started"></span>
+      <span id="shift-ctrl-sites" style="margin-left:10px"></span>
+    </div>
   </div>
 
   <!-- HITL queue -->
@@ -767,8 +771,8 @@ tr:last-child td { border-bottom: none; }
     <div class="card">
       <div class="card-title">Truck registry</div>
       <table>
-        <thead><tr><th style="width:50px">ID</th><th>Aliases</th><th style="width:60px">Active</th><th style="width:80px"></th></tr></thead>
-        <tbody id="truck-registry-body"><tr><td colspan="4" class="loading-indicator">Loading…</td></tr></tbody>
+        <thead><tr><th style="width:50px">ID</th><th style="width:130px">Display name</th><th>Aliases</th><th style="width:60px">Active</th><th style="width:60px"></th></tr></thead>
+        <tbody id="truck-registry-body"><tr><td colspan="5" class="loading-indicator">Loading…</td></tr></tbody>
       </table>
       <div style="margin-top:12px;display:flex;gap:8px">
         <input type="text" id="new-truck-id" placeholder="ID (e.g. H)" style="width:80px;padding:6px 10px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary)"/>
@@ -1493,9 +1497,20 @@ async function loadMessages() {
 
       if (!events.length) {
         // No events at all — message not yet parsed or ingestion failed
-        rightHtml = `<div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--color-text-secondary)">
-          No commit — unparsed
-          ${msgId ? `<button class="correct-btn" id="retry-msg-btn-${msgId}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLMByMsg('${msgId}')">↺ Re-LLM</button><span id="retry-msg-msg-${msgId}"></span>` : ''}
+        rightHtml = `<div style="font-size:11px;color:var(--color-text-secondary)">
+          <div style="display:flex;align-items:center;gap:8px">
+            No commit — unparsed
+            ${msgId ? `<button class="correct-btn" id="retry-msg-btn-${msgId}" style="padding:2px 10px;font-size:11px" onclick="toggleRellmMsgContext('${msgId}')">↺ Re-LLM</button>` : ''}
+          </div>
+          ${msgId ? `<div id="rellm-msg-ctx-${msgId}" style="display:none;margin-top:6px">
+            <textarea id="rellm-msg-txt-${msgId}" placeholder="Add context for LLM (optional)…" rows="2"
+              style="width:100%;font-size:11px;padding:5px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);resize:vertical;box-sizing:border-box"></textarea>
+            <div style="display:flex;gap:6px;margin-top:4px">
+              <button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none;padding:3px 12px;font-size:11px" onclick="retryWithLLMByMsg('${msgId}')">Send ↗</button>
+              <button class="correct-btn" style="font-size:11px" onclick="toggleRellmMsgContext('${msgId}')">Cancel</button>
+              <span id="retry-msg-msg-${msgId}" style="font-size:11px;color:var(--color-text-secondary)"></span>
+            </div>
+          </div>` : ''}
         </div>`;
       } else {
         // Render each event as a compact row
@@ -1550,8 +1565,19 @@ async function loadMessages() {
           const correctBtn = `<button class="correct-btn" onclick='openCorrectPanel(${JSON.stringify({event_id:ev.event_id,raw:item.raw_text,truck:ev.truck_alias||ev.truck_id,status:ev.status,site:ev.site_alias||ev.site_id,shift:ev.shift_id})})'>Correct</button>`;
           const commitBtn  = (statusStr==='FLAGGED'||statusStr==='HELD') && ev.truck_id
             ? `<button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none" onclick="forceCommit('${ev.event_id}')">Commit</button>` : '';
-          const rellmBtn   = ev.event_id && (statusStr==='FLAGGED'||statusStr==='HELD')
-            ? `<button class="correct-btn" id="retry-btn-${ev.event_id}" style="padding:2px 10px;font-size:11px" onclick="retryWithLLM('${ev.event_id}')">↺ Re-LLM</button>` : '';
+          // Re-LLM on all events (not just HELD/FLAGGED)
+          const rellmBtn = ev.event_id
+            ? `<button class="correct-btn" id="retry-btn-${ev.event_id}" style="padding:2px 10px;font-size:11px" onclick="toggleRellmContext('${ev.event_id}')">↺ Re-LLM</button>` : '';
+
+          // HITL answers display
+          const hitlAnswers = ev.hitl_answers || [];
+          const hitlHtml = hitlAnswers.length
+            ? `<div style="margin-top:4px;padding:4px 6px;background:var(--color-background-secondary);border-radius:4px;border-left:2px solid #1e40af22">
+                ${hitlAnswers.map(a => `<div style="font-size:10px;color:var(--color-text-secondary)">
+                  <span style="font-weight:500;color:#1e40af">${escHtml(a.question_type||'HITL')}</span> answer:
+                  <span style="font-family:var(--font-mono)">${escHtml(a.answer||'')}</span>
+                </div>`).join('')}
+               </div>` : '';
 
           return `<div style="padding:4px 0;border-bottom:0.5px solid var(--color-border-tertiary)">
             <div class="parsed-fields">
@@ -1565,6 +1591,16 @@ async function loadMessages() {
               ${rellmBtn} ${commitBtn} ${correctBtn}
             </div>
             ${ev.reasoning ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:2px;line-height:1.4">${escHtml(ev.reasoning)}</div>` : ''}
+            ${hitlHtml}
+            <div id="rellm-ctx-${ev.event_id}" style="display:none;margin-top:6px">
+              <textarea id="rellm-txt-${ev.event_id}" placeholder="Add context for LLM (optional)…" rows="2"
+                style="width:100%;font-size:11px;padding:5px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);resize:vertical;box-sizing:border-box"></textarea>
+              <div style="display:flex;gap:6px;margin-top:4px">
+                <button class="correct-btn" style="background:var(--color-text-primary);color:var(--color-background-primary);border:none;padding:3px 12px;font-size:11px" onclick="retryWithLLM('${ev.event_id}')">Send ↗</button>
+                <button class="correct-btn" style="font-size:11px" onclick="toggleRellmContext('${ev.event_id}')">Cancel</button>
+                <span id="retry-msg-${ev.event_id}" style="font-size:11px;color:var(--color-text-secondary)"></span>
+              </div>
+            </div>
             <div class="conf-bar-wrap"><div class="conf-bar" style="width:${barW}%;background:${barColor}"></div></div>
           </div>`;
         }).join('');
@@ -1700,23 +1736,34 @@ async function loadTruckRegistry() {
   try {
     const d = await API('/api/registry/trucks');
     const tbody = document.getElementById('truck-registry-body');
-    if(!d.trucks || !d.trucks.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No trucks</td></tr>'; return; }
+    if(!d.trucks || !d.trucks.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No trucks</td></tr>'; return; }
     tbody.innerHTML = d.trucks.map(t => {
       const aliases = Array.isArray(t.aliases) ? t.aliases.join(', ') : t.aliases||'';
       return `<tr>
-        <td>${t.truck_id}</td>
+        <td>${escHtml(t.truck_id)}</td>
         <td>
-          <input class="inline-input" id="ta-${t.truck_id}" value="${escAttr(aliases)}" style="width:calc(100% - 70px)"/>
-          <button class="save-alias-btn" onclick="saveTruckAliases('${t.truck_id}')">Save</button>
+          <input class="inline-input" id="tn-${t.truck_id}" value="${escAttr(t.display_name||t.truck_id)}" style="width:calc(100% - 46px)"/>
+          <button class="save-alias-btn" onclick="saveTruckName('${escAttr(t.truck_id)}')">Save</button>
+        </td>
+        <td>
+          <input class="inline-input" id="ta-${t.truck_id}" value="${escAttr(aliases)}" style="width:calc(100% - 46px)"/>
+          <button class="save-alias-btn" onclick="saveTruckAliases('${escAttr(t.truck_id)}')">Save</button>
         </td>
         <td><span class="dot ${t.is_active?'green':'gray'}"></span>${t.is_active?'Yes':'No'}</td>
-        <td style="display:flex;gap:4px;justify-content:center">
-          <button class="save-alias-btn" onclick="openEditTruck('${escAttr(t.truck_id)}','${escAttr(t.display_name||'')}')" title="Edit">✎</button>
+        <td style="text-align:center">
           <button class="save-alias-btn" onclick="deleteTruck('${escAttr(t.truck_id)}')" title="Delete" style="color:var(--color-text-danger)">✕</button>
         </td>
       </tr>`;
     }).join('');
   } catch(e) {}
+}
+
+async function saveTruckName(truckId) {
+  const newName = document.getElementById(`tn-${truckId}`)?.value.trim();
+  if (!newName) { alert('Name cannot be empty.'); return; }
+  try {
+    await API(`/api/registry/trucks/${encodeURIComponent(truckId)}`, {method:'PUT', body: JSON.stringify({display_name: newName})});
+  } catch(e) { alert('Save failed: '+e.message); }
 }
 
 async function saveTruckAliases(truckId) {
@@ -2101,7 +2148,7 @@ function switchTab(id, el) {
   document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
   document.getElementById('tab-'+id).classList.add('active');
   el.classList.add('active');
-  if(id === 'operator')  { populateShiftSelectors(); loadMessages(); refreshHITL(); }
+  if(id === 'operator')  { populateShiftSelectors().then(() => loadMessages()); refreshHITL(); }
   if(id === 'dashboard') { refreshKPIs(); refreshSiteAnalytics(); populateShiftSelectors().then(() => refreshShiftReport()); }
   if(id === 'commits')   { populateCommitFilters(); populateShiftSelectors(); loadCommits(); }
   if(id === 'admin')     { loadTruckRegistry(); loadSiteRegistry(); loadShiftConfig(); loadMergeTrucks(); }
@@ -2273,11 +2320,16 @@ async function shiftAction(action) {
     if(action === 'end') {
       msgEl.textContent = 'Shift ended.';
       if(nameEl) nameEl.textContent = 'No active shift';
+      const infoEl = document.getElementById('shift-ctrl-info');
+      if (infoEl) infoEl.style.display = 'none';
     } else {
       msgEl.textContent = `${action === 'resume' ? 'Resumed' : 'Started'}: ${label}`;
       if(nameEl) nameEl.textContent = `Active: ${label}`;
     }
     refreshKPIs();
+    // Refresh shift selectors so msg-shift picks up new active shift, then reload messages
+    await populateShiftSelectors();
+    loadMessages();
     setTimeout(() => { if(msgEl) msgEl.textContent = ''; }, 4000);
   } catch(e) {
     msgEl.style.color = 'var(--color-text-danger)';
@@ -2323,32 +2375,60 @@ async function submitMap(eventId) {
   }
 }
 
+function toggleRellmContext(eventId) {
+  const box = document.getElementById(`rellm-ctx-${eventId}`);
+  if (!box) return;
+  const open = box.style.display === 'none' || box.style.display === '';
+  box.style.display = open ? '' : 'none';
+  if (open) box.querySelector('textarea')?.focus();
+}
+
 async function retryWithLLM(eventId) {
   const btn   = document.getElementById(`retry-btn-${eventId}`);
   const msgEl = document.getElementById(`retry-msg-${eventId}`);
-  if(btn) { btn.disabled = true; btn.textContent = '…'; }
-  if(msgEl) { msgEl.textContent = 'Retrying…'; msgEl.style.color = 'var(--color-text-secondary)'; }
+  const ctxEl = document.getElementById(`rellm-txt-${eventId}`);
+  const context = ctxEl ? ctxEl.value.trim() : '';
+  if(btn) { btn.disabled = true; }
+  if(msgEl) { msgEl.textContent = 'Queuing…'; msgEl.style.color = 'var(--color-text-secondary)'; }
   try {
-    await API(`/api/ingest/reprocess-event/${eventId}`, { method: 'POST' });
+    const opts = { method: 'POST' };
+    if (context) opts.body = JSON.stringify({ context });
+    await API(`/api/ingest/reprocess-event/${eventId}`, opts);
     if(msgEl) { msgEl.textContent = 'Queued ✓'; msgEl.style.color = 'var(--color-committed-text,#27500A)'; }
+    const box = document.getElementById(`rellm-ctx-${eventId}`);
+    if (box) box.style.display = 'none';
     setTimeout(loadMessages, 1500);
   } catch(e) {
-    if(btn) { btn.disabled = false; btn.textContent = '↺ Re-LLM'; }
+    if(btn) { btn.disabled = false; }
     if(msgEl) { msgEl.textContent = 'Error: '+e.message; msgEl.style.color = 'var(--color-text-danger)'; }
   }
+}
+
+function toggleRellmMsgContext(msgId) {
+  const box = document.getElementById(`rellm-msg-ctx-${msgId}`);
+  if (!box) return;
+  const open = box.style.display === 'none' || box.style.display === '';
+  box.style.display = open ? '' : 'none';
+  if (open) box.querySelector('textarea')?.focus();
 }
 
 async function retryWithLLMByMsg(msgId) {
   const btn   = document.getElementById(`retry-msg-btn-${msgId}`);
   const msgEl = document.getElementById(`retry-msg-msg-${msgId}`);
-  if(btn) { btn.disabled = true; btn.textContent = '…'; }
-  if(msgEl) { msgEl.textContent = 'Retrying…'; msgEl.style.color = 'var(--color-text-secondary)'; }
+  const ctxEl = document.getElementById(`rellm-msg-txt-${msgId}`);
+  const context = ctxEl ? ctxEl.value.trim() : '';
+  if(btn) { btn.disabled = true; }
+  if(msgEl) { msgEl.textContent = 'Queuing…'; msgEl.style.color = 'var(--color-text-secondary)'; }
   try {
-    await API(`/api/ingest/reprocess-message/${msgId}`, { method: 'POST' });
+    const opts = { method: 'POST' };
+    if (context) opts.body = JSON.stringify({ context });
+    await API(`/api/ingest/reprocess-message/${msgId}`, opts);
     if(msgEl) { msgEl.textContent = 'Queued ✓'; msgEl.style.color = 'var(--color-committed-text,#27500A)'; }
+    const box = document.getElementById(`rellm-msg-ctx-${msgId}`);
+    if (box) box.style.display = 'none';
     setTimeout(loadMessages, 1500);
   } catch(e) {
-    if(btn) { btn.disabled = false; btn.textContent = '↺ Re-LLM'; }
+    if(btn) { btn.disabled = false; }
     if(msgEl) { msgEl.textContent = 'Error: '+e.message; msgEl.style.color = 'var(--color-text-danger)'; }
   }
 }
@@ -2464,22 +2544,46 @@ async function populateShiftSelectors() {
       clSel.innerHTML = '<option value="">All shifts</option>';
       shifts.forEach(sh => {
         const start = sh.started_at ? formatIST(sh.started_at) : '–';
-        const label = `${sh.shift_name} (${start})`;
+        const end   = sh.ended_at   ? formatIST(sh.ended_at)   : 'active';
+        const sites = sh.default_sites?.length ? ' · ' + sh.default_sites.join(', ') : '';
+        const label = `${sh.shift_name} · ${start}–${end}${sites}`;
         clSel.add(new Option(label, sh.shift_id));
       });
     }
 
-    // Operator messages shift filter
+    // Operator messages shift filter — default to active shift
     const msgSel = document.getElementById('msg-shift');
     if (msgSel) {
-      const cur = msgSel.value;
+      const prevVal = msgSel.value; // preserve user selection across refreshes
       msgSel.innerHTML = '<option value="">All shifts</option>';
+      let activeShiftId = '';
       shifts.forEach(sh => {
         const start = sh.started_at ? formatIST(sh.started_at) : '–';
-        const label = `${sh.shift_name} (${start})`;
+        const end   = sh.ended_at   ? formatIST(sh.ended_at)   : 'active';
+        const sites = sh.default_sites && sh.default_sites.length ? ' · ' + sh.default_sites.join(', ') : '';
+        const label = `${sh.shift_name} · ${start}–${end}${sites}`;
         msgSel.add(new Option(label, sh.shift_id));
+        if (sh.active) activeShiftId = sh.shift_id;
       });
-      msgSel.value = cur; // restore selection if possible
+      // If user had a selection, keep it; otherwise default to active shift
+      if (prevVal && [...msgSel.options].some(o => o.value === prevVal)) {
+        msgSel.value = prevVal;
+      } else if (activeShiftId) {
+        msgSel.value = activeShiftId;
+      }
+
+      // Update shift info block
+      const activeSh = shifts.find(s => s.active);
+      const infoEl = document.getElementById('shift-ctrl-info');
+      if (activeSh && infoEl) {
+        const startedEl = document.getElementById('shift-ctrl-started');
+        const sitesEl   = document.getElementById('shift-ctrl-sites');
+        if (startedEl) startedEl.textContent = `Started: ${formatIST(activeSh.started_at)}`;
+        if (sitesEl)   sitesEl.textContent   = activeSh.default_sites?.length ? `Default sites: ${activeSh.default_sites.join(', ')}` : '';
+        infoEl.style.display = '';
+      } else if (infoEl) {
+        infoEl.style.display = 'none';
+      }
     }
   } catch(e) {}
 }

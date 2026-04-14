@@ -128,36 +128,38 @@ async def lifespan(application: FastAPI):
 
     async def _periodic_summary_loop():
         """Post a shift summary to the control group every 15 minutes (only when a shift is active)."""
-        import sqlite3 as _sq3
-        from fleet_pipeline.config import (
-            WA_CONTROL_GROUP_JID,
-            WA_GROUP_JID,
-            DB_PATH as _DB_PATH2,
-        )
-        from fleet_pipeline.pipeline.wa_notifier import (
-            send_summary_to_group as _send_summary,
-        )
-
         while True:
             await asyncio.sleep(900)  # 15 minutes
-            summary_jid = WA_CONTROL_GROUP_JID or WA_GROUP_JID
+
+            # Read config fresh each iteration — guards against import-time empty values
+            import sqlite3 as _sq3
+            import os as _os
+            from fleet_pipeline.config import DB_PATH as _DB_PATH2
+
+            _ctrl = _os.environ.get("WA_CONTROL_GROUP_JID", "").strip()
+            _fleet = _os.environ.get("WA_GROUP_JID", "").strip()
+            summary_jid = _ctrl or _fleet
             if not summary_jid:
+                log.debug("Periodic summary: no WA group JID configured — skipping")
                 continue
+
             # Only send when there is an active (open) shift
             try:
-                _chk = _sq3.connect(_DB_PATH2)
-                _active = _chk.execute(
-                    "SELECT shift_id FROM shifts WHERE ended_at IS NULL LIMIT 1"
-                ).fetchone()
-                _chk.close()
+                with _sq3.connect(_DB_PATH2) as _chk:
+                    _active = _chk.execute(
+                        "SELECT shift_id FROM shifts WHERE ended_at IS NULL LIMIT 1"
+                    ).fetchone()
                 if not _active:
+                    log.debug("Periodic summary: no active shift — skipping")
                     continue
             except Exception as _chk_exc:
                 log.warning("Periodic summary shift-check failed: %s", _chk_exc)
                 continue
+
             try:
+                from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group as _send_summary
                 _send_summary(summary_jid, _DB_PATH2)
-                log.info("Periodic summary posted to %s", summary_jid)
+                log.info("Periodic 15-min summary posted (jid=%s…)", summary_jid[:8])
             except Exception as _exc:
                 log.warning("Periodic summary post failed: %s", _exc)
 
