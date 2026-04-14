@@ -603,6 +603,42 @@ def get_shift_default_sites(conn: sqlite3.Connection, shift_id: str) -> List[str
     return []
 
 
+def insert_shift_event(conn: sqlite3.Connection, ev: Dict[str, Any]) -> None:
+    conn.execute(
+        """INSERT INTO shift_events
+           (shift_event_id, shift_id, status, timestamp_iso, commit_status,
+            wa_message_id, site_id, site_ids_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            ev["shift_event_id"],
+            ev["shift_id"],
+            ev["status"],
+            ev["timestamp_iso"],
+            ev.get("commit_status", "COMMITTED"),
+            ev.get("wa_message_id"),
+            ev.get("site_id"),
+            ev.get("site_ids_json"),
+        ),
+    )
+
+
+def get_shift_event_by_wa_message_id(
+    conn: sqlite3.Connection, wa_message_id: str
+) -> Optional[Dict]:
+    row = conn.execute(
+        "SELECT * FROM shift_events WHERE wa_message_id=?",
+        (wa_message_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def mark_shift_event_deleted(conn: sqlite3.Connection, shift_event_id: str) -> None:
+    conn.execute(
+        "UPDATE shift_events SET commit_status='DELETED' WHERE shift_event_id=?",
+        (shift_event_id,),
+    )
+
+
 def merge_trucks(conn: sqlite3.Connection, src_id: str, dst_id: str) -> dict:
     """
     Merge truck src_id into dst_id:

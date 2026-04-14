@@ -141,10 +141,27 @@ CREATE TABLE IF NOT EXISTS shifts (
     detection_method TEXT DEFAULT 'time_based',  -- time_based | wa_signal | manual
     shift_name       TEXT,                       -- added via migration
     default_site_id  TEXT,                       -- site announced with shift start (via control group)
+    default_site_ids TEXT,                       -- JSON array of site IDs
     notes            TEXT,
     simulation_run_id TEXT REFERENCES simulation_runs(run_id),
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Shift events: SHIFT_START / SHIFT_END commits (tracks shift lifecycle)
+CREATE TABLE IF NOT EXISTS shift_events (
+    shift_event_id   TEXT PRIMARY KEY,
+    shift_id         TEXT REFERENCES shifts(shift_id),
+    status           TEXT NOT NULL,              -- SHIFT_START | SHIFT_END
+    timestamp_iso    TEXT NOT NULL,
+    commit_status    TEXT DEFAULT 'COMMITTED',   -- COMMITTED | DELETED
+    wa_message_id    TEXT,                      -- original WA message that triggered this
+    site_id          TEXT,                       -- default site from shift start
+    site_ids_json    TEXT,                       -- JSON array of default sites
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_shift_events_shift_id ON shift_events(shift_id);
+CREATE INDEX IF NOT EXISTS idx_shift_events_wa_message_id ON shift_events(wa_message_id);
 
 -- Shift configuration (admin-editable)
 CREATE TABLE IF NOT EXISTS shift_config (

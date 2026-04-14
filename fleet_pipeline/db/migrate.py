@@ -54,6 +54,28 @@ def run_migrations(db_path: str = DB_PATH) -> None:
         _add_column(conn, "shifts", "start_notif_bot_msg_id", "TEXT")
         _add_column(conn, "shifts", "end_notif_bot_msg_id", "TEXT")
 
+        print("\n[shift_events] Creating table...")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS shift_events (
+                shift_event_id   TEXT PRIMARY KEY,
+                shift_id         TEXT REFERENCES shifts(shift_id),
+                status           TEXT NOT NULL,
+                timestamp_iso    TEXT NOT NULL,
+                commit_status    TEXT DEFAULT 'COMMITTED',
+                wa_message_id    TEXT,
+                site_id          TEXT,
+                site_ids_json    TEXT,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shift_events_shift_id ON shift_events(shift_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shift_events_wa_message_id ON shift_events(wa_message_id)"
+        )
+        print("  + shift_events table created")
+
         print("\n[hitl_queue] Adding new columns...")
         _add_column(conn, "hitl_queue", "wa_message_id", "TEXT")
 

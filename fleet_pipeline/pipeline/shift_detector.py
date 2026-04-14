@@ -262,26 +262,93 @@ def _open_conn(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def operator_start(db_path: str) -> dict:
+def operator_start(db_path: str, wa_message_id: Optional[str] = None) -> dict:
     """Force-start a new shift right now. Returns the new shift dict."""
     conn = _open_conn(db_path)
+    ts = now_ist()
     try:
         sd = ShiftDetector(conn)
-        sd._start_new(now_ist(), method="operator")
+        sd._start_new(ts, method="operator")
+        if sd._active:
+            msg_id = wa_message_id or f"operator_start_{ts.isoformat()}"
+            conn.execute(
+                """INSERT INTO shift_events
+                   (shift_event_id, shift_id, status, timestamp_iso,
+                    commit_status, wa_message_id, site_id, site_ids_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    f"shift_start_{sd._active['shift_id']}",
+                    sd._active["shift_id"],
+                    "SHIFT_START",
+                    ts.isoformat(),
+                    "COMMITTED",
+                    msg_id,
+                    sd._active.get("default_site_id"),
+                    sd._active.get("default_site_ids"),
+                ),
+            )
         conn.commit()
         return sd._active or {}
     finally:
         conn.close()
 
 
-def operator_end(db_path: str) -> bool:
+def operator_end(db_path: str, wa_message_id: Optional[str] = None) -> bool:
     """End the active shift. Returns True if a shift was ended."""
     conn = _open_conn(db_path)
+    ts = now_ist()
     try:
         sd = ShiftDetector(conn)
         if not sd._active:
             return False
-        sd._end(now_ist())
+        msg_id = wa_message_id or f"operator_end_{ts.isoformat()}"
+        conn.execute(
+            """INSERT INTO shift_events
+               (shift_event_id, shift_id, status, timestamp_iso,
+                commit_status, wa_message_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                f"shift_end_{sd._active['shift_id']}",
+                sd._active["shift_id"],
+                "SHIFT_END",
+                ts.isoformat(),
+                "COMMITTED",
+                msg_id,
+            ),
+        )
+        sd._end(ts)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def operator_end(db_path: str, wa_message_id: Optional[str] = None) -> bool:
+    """End the active shift. Returns True if a shift was ended."""
+    conn = _open_conn(db_path)
+    ts = now_ist()
+    try:
+        sd = ShiftDetector(conn)
+        if not sd._active:
+            return False
+        msg_id = wa_message_id or f"operator_end_{ts.isoformat()}"
+        conn.execute(
+            """INSERT INTO events
+               (event_id, msg_id, status, timestamp_effective,
+                commit_status, wa_message_id, shift_id, confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                f"shift_end_{sd._active['shift_id']}",
+                msg_id,
+                "SHIFT_END",
+                ts.isoformat(),
+                "COMMITTED",
+                msg_id,
+                sd._active["shift_id"],
+                1.0,
+            ),
+        )
+        sd._end(ts)
         conn.commit()
         return True
     finally:

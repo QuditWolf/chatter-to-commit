@@ -256,7 +256,7 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
             if not shift:
                 text = "No active shift."
             else:
-                shift_id   = shift["shift_id"]
+                shift_id = shift["shift_id"]
                 shift_name = shift["shift_name"]
 
                 # Loaded per site
@@ -338,14 +338,18 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
                 lines.append(f"Trolleys UNLOADED = {total_unloaded}")
                 if in_loading_count > 0:
                     aliases_str = ", ".join(in_loading_aliases)
-                    lines.append(f"Trolleys in Loading = {in_loading_count}  ({aliases_str})")
+                    lines.append(
+                        f"Trolleys in Loading = {in_loading_count}  ({aliases_str})"
+                    )
                 else:
                     lines.append("Trolleys in Loading = 0")
 
                 if load_cycles_rows:
                     lines.append("")
                     lines.append("Load cycles per trolley:")
-                    cycle_parts = [f"{r['alias']} = {r['cnt']}" for r in load_cycles_rows]
+                    cycle_parts = [
+                        f"{r['alias']} = {r['cnt']}" for r in load_cycles_rows
+                    ]
                     lines.append("  " + "   ".join(cycle_parts))
 
                 text = "\n".join(lines)
@@ -440,9 +444,7 @@ def send_shift_notification(
                 )
                 _conn.commit()
         except Exception as exc:
-            log.warning(
-                "send_shift_notification: could not store bot_msg_id: %s", exc
-            )
+            log.warning("send_shift_notification: could not store bot_msg_id: %s", exc)
 
 
 def send_commit_notification(event: dict, group_jid: str, db_path: str) -> None:
@@ -475,8 +477,9 @@ def send_commit_notification(event: dict, group_jid: str, db_path: str) -> None:
     timestamp_ist = (event.get("timestamp_ist") or "").strip()
     sender = (event.get("sender_name") or "").strip()
     msg_line = f'\n_Msg: "{raw_text[:80]}"_' if raw_text else ""
+    separator = " \u00b7 "
     meta_parts = [p for p in (timestamp_ist, sender) if p]
-    meta_line = f"\n_{' \u00b7 '.join(meta_parts)}_" if meta_parts else ""
+    meta_line = f"\n_{separator.join(meta_parts)}_" if meta_parts else ""
 
     text = (
         f"\u2705 Committed _{tag_str}_: *{truck} {status}* @ {site}"
@@ -516,8 +519,9 @@ def send_deletion_notification(
         return
 
     msg_preview = (raw_text or "").strip()[:80] or "(unknown)"
+    separator = " \u00b7 "
     meta_parts = [p for p in (timestamp_ist, sender_name) if p]
-    meta_line = f"\n_{' \u00b7 '.join(meta_parts)}_" if meta_parts else ""
+    meta_line = f"\n_{separator.join(meta_parts)}_" if meta_parts else ""
 
     text = (
         f"\U0001f5d1 *Message deleted* \u2014 {events_deleted} event(s) removed\n"

@@ -96,6 +96,7 @@ def _parse_ts(ts_str: str):
     try:
         from datetime import datetime, timezone
         import pytz
+
         dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=pytz.timezone("Asia/Kolkata"))
@@ -110,6 +111,7 @@ def _fmt_ts(dt) -> str:
         return ""
     try:
         import pytz
+
         ist = pytz.timezone("Asia/Kolkata")
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=ist)
@@ -145,10 +147,10 @@ def _spread_same_message_timestamps(events: list) -> None:
 
     # Gap that precedes each status (how long before this status the prior one was)
     _GAP_BEFORE = {
-        "LS":   timedelta(minutes=5),
-        "US":   timedelta(minutes=5),
-        "LO":   timedelta(minutes=30),
-        "UO":   timedelta(minutes=30),
+        "LS": timedelta(minutes=5),
+        "US": timedelta(minutes=5),
+        "LO": timedelta(minutes=30),
+        "UO": timedelta(minutes=30),
         "LEFT": timedelta(minutes=5),
     }
     _STATUS_ORDER = {"ENTER": 0, "LS": 1, "US": 1, "LO": 2, "UO": 2, "LEFT": 3}
@@ -156,7 +158,11 @@ def _spread_same_message_timestamps(events: list) -> None:
     # Group non-inferred, valid-status events by truck_id
     by_truck: dict = defaultdict(list)
     for i, ev in enumerate(events):
-        if not ev.get("inferred") and ev.get("truck_id") and ev.get("status") in _STATUS_ORDER:
+        if (
+            not ev.get("inferred")
+            and ev.get("truck_id")
+            and ev.get("status") in _STATUS_ORDER
+        ):
             by_truck[ev["truck_id"]].append(ev)
 
     for truck_id, tevs in by_truck.items():
@@ -172,7 +178,9 @@ def _spread_same_message_timestamps(events: list) -> None:
             continue
 
         # Sort earliest-first by status order, stable for ties
-        tevs_sorted = sorted(tevs, key=lambda e: _STATUS_ORDER.get(e.get("status", ""), 99))
+        tevs_sorted = sorted(
+            tevs, key=lambda e: _STATUS_ORDER.get(e.get("status", ""), 99)
+        )
 
         # Last event keeps the anchor; work backwards assigning timestamps
         current_ts = anchor
@@ -183,7 +191,9 @@ def _spread_same_message_timestamps(events: list) -> None:
                 # Tag them so the UI can show a "~" approximate-time indicator.
                 tevs_sorted[idx]["timestamp_approximate"] = True
                 # Gap is determined by THIS (later) event's status
-                current_ts = current_ts - _GAP_BEFORE.get(tevs_sorted[idx]["status"], timedelta(minutes=5))
+                current_ts = current_ts - _GAP_BEFORE.get(
+                    tevs_sorted[idx]["status"], timedelta(minutes=5)
+                )
 
 
 def _apply_inferred_timestamps(events: list) -> None:
@@ -218,7 +228,9 @@ def _apply_inferred_timestamps(events: list) -> None:
                 if events[j].get("status") in ("LS", "US"):
                     anchor = _parse_ts(events[j].get("timestamp_effective", ""))
                     if anchor:
-                        ev["timestamp_effective"] = _fmt_ts(anchor - timedelta(minutes=5))
+                        ev["timestamp_effective"] = _fmt_ts(
+                            anchor - timedelta(minutes=5)
+                        )
                     break
 
         elif status in ("LS", "US"):
@@ -227,7 +239,9 @@ def _apply_inferred_timestamps(events: list) -> None:
                 if events[j].get("status") in ("LO", "UO"):
                     anchor = _parse_ts(events[j].get("timestamp_effective", ""))
                     if anchor:
-                        ev["timestamp_effective"] = _fmt_ts(anchor - timedelta(minutes=30))
+                        ev["timestamp_effective"] = _fmt_ts(
+                            anchor - timedelta(minutes=30)
+                        )
                     break
 
         elif status in ("LO", "UO"):
@@ -236,7 +250,9 @@ def _apply_inferred_timestamps(events: list) -> None:
                 if events[j].get("status") in ("LS", "US"):
                     anchor = _parse_ts(events[j].get("timestamp_effective", ""))
                     if anchor:
-                        ev["timestamp_effective"] = _fmt_ts(anchor + timedelta(minutes=30))
+                        ev["timestamp_effective"] = _fmt_ts(
+                            anchor + timedelta(minutes=30)
+                        )
                     break
 
         elif status == "LEFT":
@@ -245,7 +261,9 @@ def _apply_inferred_timestamps(events: list) -> None:
                 if events[j].get("status") in ("LO", "UO"):
                     anchor = _parse_ts(events[j].get("timestamp_effective", ""))
                     if anchor:
-                        ev["timestamp_effective"] = _fmt_ts(anchor + timedelta(minutes=5))
+                        ev["timestamp_effective"] = _fmt_ts(
+                            anchor + timedelta(minutes=5)
+                        )
                     break
 
 
@@ -381,7 +399,9 @@ class Committer:
                     )
                     from fleet_pipeline.config import WA_CONTROL_GROUP_JID
 
-                    notify_jid = _resolve_group_jid(WA_CONTROL_GROUP_JID or self.group_jid)
+                    notify_jid = _resolve_group_jid(
+                        WA_CONTROL_GROUP_JID or self.group_jid
+                    )
                     if notify_jid:
                         send_commit_notification(notif_ev, notify_jid, self.db_path)
                 except Exception as _exc:
@@ -392,8 +412,10 @@ class Committer:
             if self.group_jid:
                 try:
                     from fleet_pipeline.pipeline.wa_notifier import (
-                        _post_send_message, _resolve_group_jid,
+                        _post_send_message,
+                        _resolve_group_jid,
                     )
+
                     notify_jid = _resolve_group_jid(self.group_jid)
                     if notify_jid:
                         msg = (
@@ -543,7 +565,9 @@ class Committer:
             return None
         new_id = db.auto_create_truck(conn, truck_alias)
         if new_id:
-            log.info("[AUTO-TRUCK] Created new truck: %s (alias=%s)", new_id, truck_alias)
+            log.info(
+                "[AUTO-TRUCK] Created new truck: %s (alias=%s)", new_id, truck_alias
+            )
         return new_id
 
     def _needs_inferred_enter(self, conn, truck_id: str, site_id: str) -> bool:
@@ -663,12 +687,20 @@ class Committer:
     ):
         events = level3_result.get("events", []) or []
         # Message metadata for commit notifications
-        _msg_timestamp_iso = level3_result.get("raw_message", {}).get("timestamp_iso", "")
+        _msg_timestamp_iso = level3_result.get("raw_message", {}).get(
+            "timestamp_iso", ""
+        )
         try:
-            _msg_timestamp_ist = to_ist(_msg_timestamp_iso) if _msg_timestamp_iso else ""
+            _msg_timestamp_ist = (
+                to_ist(_msg_timestamp_iso) if _msg_timestamp_iso else ""
+            )
         except Exception:
             _msg_timestamp_ist = ""
-        _msg_sender = level3_result.get("raw_message", {}).get("sender_name", "") or self.sender_id or ""
+        _msg_sender = (
+            level3_result.get("raw_message", {}).get("sender_name", "")
+            or self.sender_id
+            or ""
+        )
 
         # Pre-validate all truck_id/site_id values in the LLM output once.
         # Any ID not present in the DB is nulled out so downstream logic
@@ -813,7 +845,13 @@ class Committer:
                 ev.get("timestamp_effective", ""),
             )
             if dup_reason:
-                log.info("[DUPLICATE] Skipping %s %s@%s — %s", status, truck_alias or truck_id, site_id, dup_reason)
+                log.info(
+                    "[DUPLICATE] Skipping %s %s@%s — %s",
+                    status,
+                    truck_alias or truck_id,
+                    site_id,
+                    dup_reason,
+                )
                 if msg_id:
                     db.insert_event(
                         conn,
@@ -842,7 +880,10 @@ class Committer:
             # Site inference — applied only when LLM didn't provide a site.
             # Priority: same sender same shift → any sender same shift → single default site.
             # Multiple default sites → UNKNOWN_SITE HITL.
-            if ev.get("site_id") is None and ev.get("status", "") in SITE_REQUIRED_STATUSES:
+            if (
+                ev.get("site_id") is None
+                and ev.get("status", "") in SITE_REQUIRED_STATUSES
+            ):
                 ev_shift_id = ev.get("shift_id") or resolved_shift_id
 
                 # 1. Same sender, same shift (most reliable)
@@ -855,9 +896,13 @@ class Committer:
                         ev["site_id"] = inferred_site[0]
                         ev["site_alias"] = inferred_site[1]
                         ev["inferred"] = True
-                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.72)
+                        ev["confidence"] = min(
+                            ev.get("confidence", overall_confidence), 0.72
+                        )
                         note = f"site inferred from same sender in current shift ({inferred_site[1] or inferred_site[0]})"
-                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
+                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip(
+                            "; "
+                        )
 
                 # 2. Any sender, same shift (fallback)
                 if ev.get("site_id") is None and ev_shift_id:
@@ -866,9 +911,13 @@ class Committer:
                         ev["site_id"] = any_site[0]
                         ev["site_alias"] = any_site[1]
                         ev["inferred"] = True
-                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.65)
+                        ev["confidence"] = min(
+                            ev.get("confidence", overall_confidence), 0.65
+                        )
                         note = f"site inferred from recent shift activity ({any_site[1] or any_site[0]})"
-                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
+                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip(
+                            "; "
+                        )
 
                 # 3. Shift default site (announced at shift start)
                 # Filter default sites by operation type:
@@ -881,11 +930,14 @@ class Committer:
                         _unloading_ops = {"US", "UO"}
                         _ev_status = ev.get("status", "")
                         if _ev_status in _loading_ops or _ev_status in _unloading_ops:
-                            _target_type = "loading" if _ev_status in _loading_ops else "unloading"
+                            _target_type = (
+                                "loading" if _ev_status in _loading_ops else "unloading"
+                            )
                             _typed = []
                             for _ds in default_sites:
                                 _sr = conn.execute(
-                                    "SELECT site_type FROM sites WHERE site_id=?", (_ds,)
+                                    "SELECT site_type FROM sites WHERE site_id=?",
+                                    (_ds,),
                                 ).fetchone()
                                 if _sr and _sr["site_type"] == _target_type:
                                     _typed.append(_ds)
@@ -899,14 +951,20 @@ class Committer:
                         ev["site_id"] = default_sites[0]
                         ev["site_alias"] = ev.get("site_alias") or default_sites[0]
                         ev["inferred"] = True
-                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.82)
+                        ev["confidence"] = min(
+                            ev.get("confidence", overall_confidence), 0.82
+                        )
                         note = f"site from shift default ({default_sites[0]})"
-                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
+                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip(
+                            "; "
+                        )
                     elif len(default_sites) > 1:
                         # Multiple default sites of same type — need operator to clarify
                         # Leave site_id=None so UNKNOWN_SITE HITL fires below
                         note = f"multiple default sites {default_sites} — operator must clarify"
-                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
+                        ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip(
+                            "; "
+                        )
 
             # 4. Reply context fallback: if LLM didn't extract truck/site, use from reply chain
             if reply_context and ev.get("truck_id") is None:
@@ -915,13 +973,18 @@ class Committer:
                     _rt = reply_trucks[0]
                     # Resolve truck alias → truck_id
                     _tr_row = conn.execute(
-                        "SELECT truck_id FROM trucks WHERE truck_id=? AND is_active=1", (_rt,)
+                        "SELECT truck_id FROM trucks WHERE truck_id=? AND is_active=1",
+                        (_rt,),
                     ).fetchone()
                     if not _tr_row:
-                        for _tr in conn.execute("SELECT truck_id, aliases FROM trucks WHERE is_active=1"):
+                        for _tr in conn.execute(
+                            "SELECT truck_id, aliases FROM trucks WHERE is_active=1"
+                        ):
                             try:
                                 _als = json.loads(_tr["aliases"] or "[]")
-                                if _rt in _als or _rt.lower() in [a.lower() for a in _als]:
+                                if _rt in _als or _rt.lower() in [
+                                    a.lower() for a in _als
+                                ]:
                                     _tr_row = _tr
                                     break
                             except Exception:
@@ -930,22 +993,33 @@ class Committer:
                         ev["truck_id"] = _tr_row["truck_id"]
                         ev["truck_alias"] = _rt
                         ev["inferred"] = True
-                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.75)
+                        ev["confidence"] = min(
+                            ev.get("confidence", overall_confidence), 0.75
+                        )
                         reply_text = reply_context.get("reply_to_raw_text", "")
-                        ev["reasoning"] = f"truck from reply chain ({reply_text[:40]}); {ev.get('reasoning') or ''}".strip("; ")
+                        ev["reasoning"] = (
+                            f"truck from reply chain ({reply_text[:40]}); {ev.get('reasoning') or ''}".strip(
+                                "; "
+                            )
+                        )
 
             if reply_context and ev.get("site_id") is None:
                 reply_sites = reply_context.get("reply_to_sites") or []
                 if len(reply_sites) == 1:
                     _rs = reply_sites[0]
                     _si_row = conn.execute(
-                        "SELECT site_id FROM sites WHERE site_id=? AND is_active=1", (_rs,)
+                        "SELECT site_id FROM sites WHERE site_id=? AND is_active=1",
+                        (_rs,),
                     ).fetchone()
                     if not _si_row:
-                        for _si in conn.execute("SELECT site_id, aliases FROM sites WHERE is_active=1"):
+                        for _si in conn.execute(
+                            "SELECT site_id, aliases FROM sites WHERE is_active=1"
+                        ):
                             try:
                                 _als = json.loads(_si["aliases"] or "[]")
-                                if _rs in _als or _rs.lower() in [a.lower() for a in _als]:
+                                if _rs in _als or _rs.lower() in [
+                                    a.lower() for a in _als
+                                ]:
                                     _si_row = _si
                                     break
                             except Exception:
@@ -954,9 +1028,15 @@ class Committer:
                         ev["site_id"] = _si_row["site_id"]
                         ev["site_alias"] = _rs
                         ev["inferred"] = True
-                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.75)
+                        ev["confidence"] = min(
+                            ev.get("confidence", overall_confidence), 0.75
+                        )
                         reply_text = reply_context.get("reply_to_raw_text", "")
-                        ev["reasoning"] = f"site from reply chain ({reply_text[:40]}); {ev.get('reasoning') or ''}".strip("; ")
+                        ev["reasoning"] = (
+                            f"site from reply chain ({reply_text[:40]}); {ev.get('reasoning') or ''}".strip(
+                                "; "
+                            )
+                        )
 
             truck_id = ev.get("truck_id")
             site_id = ev.get("site_id")
@@ -974,7 +1054,7 @@ class Committer:
                 reply_text = reply_context.get("reply_to_raw_text", "")
                 if reply_text and "reply to:" not in (ev.get("reasoning") or ""):
                     ev["reasoning"] = (
-                        f"reply to: \"{reply_text[:60]}\"; {ev.get('reasoning') or ''}"
+                        f'reply to: "{reply_text[:60]}"; {ev.get("reasoning") or ""}'
                     ).strip("; ")
 
             # Determine final commit status for this event
@@ -1126,7 +1206,11 @@ class Committer:
                             summary.setdefault("_new_trucks", []).append(
                                 (new_truck_id, truck_alias)
                             )
-                            log.info("[AUTO-TRUCK] Event updated: truck_id=%s alias=%s", new_truck_id, truck_alias)
+                            log.info(
+                                "[AUTO-TRUCK] Event updated: truck_id=%s alias=%s",
+                                new_truck_id,
+                                truck_alias,
+                            )
                             # Don't create HITL question — truck is now registered
                             continue
                         else:
@@ -1190,7 +1274,11 @@ class Committer:
                         **wa_ctx,
                         reasoning=ev_reasoning,
                     )
-                log.info("[HITL] Created %s question for %s", q_type, truck_alias or site_alias or "?")
+                log.info(
+                    "[HITL] Created %s question for %s",
+                    q_type,
+                    truck_alias or site_alias or "?",
+                )
                 summary["hitl_created"] += 1
 
     def _determine_commit_status(

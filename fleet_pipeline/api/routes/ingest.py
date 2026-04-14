@@ -319,18 +319,18 @@ async def _handle_control_message(
     # Covers: shift summaries (──), shift notifications (🟢/🔴/↩), commit
     # notifications (✅ Committed), deletion notifications (🗑), HITL questions (❓/⚠️).
     _BOT_PREFIXES = (
-        "\u2500\u2500",   # ── shift summary
+        "\u2500\u2500",  # ── shift summary
         "--",
-        "\U0001f7e2",     # 🟢 shift start
-        "\U0001f534",     # 🔴 shift end
-        "\u21a9",         # ↩ shift resume
+        "\U0001f7e2",  # 🟢 shift start
+        "\U0001f534",  # 🔴 shift end
+        "\u21a9",  # ↩ shift resume
         "\u2705 Committed",  # commit notification
-        "\U0001f5d1",     # 🗑 deletion notification
+        "\U0001f5d1",  # 🗑 deletion notification
         "\u2705 New trolley",  # new truck notification
         "\u2705 Merged",
-        "\u26a0\ufe0f",   # ⚠️ loading alert / HITL
-        "\u274c",         # ❌
-        "\u2753",         # ❓ HITL question
+        "\u26a0\ufe0f",  # ⚠️ loading alert / HITL
+        "\u274c",  # ❌
+        "\u2753",  # ❓ HITL question
     )
     if any(text.startswith(p) for p in _BOT_PREFIXES):
         log.debug("[CTRL] Skipped — looks like bot-generated message (prefix guard)")
@@ -340,8 +340,8 @@ async def _handle_control_message(
     # Supports: "no start" / "cancel" → end shift; "resume" → resume last shift
     #           "no end" / "resume" → resume the just-ended shift
     _NO_START_RE = re.compile(r"\b(no\s+start|don.?t\s+start|cancel)\b", re.I)
-    _RESUME_RE   = re.compile(r"\bresume\b", re.I)
-    _NO_END_RE   = re.compile(r"\b(no\s+end|don.?t\s+end)\b", re.I)
+    _RESUME_RE = re.compile(r"\bresume\b", re.I)
+    _NO_END_RE = re.compile(r"\b(no\s+end|don.?t\s+end)\b", re.I)
 
     if is_reply and quoted_wa_message_id:
         try:
@@ -395,7 +395,9 @@ async def _handle_control_message(
                                 "SELECT * FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
                             ).fetchone()
                             if new_shift:
-                                send_shift_notification(dict(new_shift), "resume", ctrl_jid, DB_PATH)
+                                send_shift_notification(
+                                    dict(new_shift), "resume", ctrl_jid, DB_PATH
+                                )
                 except Exception as _exc:
                     log.warning("[CTRL] Post-action notification failed: %s", _exc)
                 await ws_manager.broadcast(
@@ -419,8 +421,22 @@ async def _handle_control_message(
             log.warning("[CTRL] commit notif lookup failed: %s", _exc)
 
         if _commit_ev:
-            _CONFIRM_SET = {"ok", "yes", "okay", "confirm", "confirmed", "correct",
-                            "right", "noted", "👍", "✓", "✔", "k", "ha", "haan"}
+            _CONFIRM_SET = {
+                "ok",
+                "yes",
+                "okay",
+                "confirm",
+                "confirmed",
+                "correct",
+                "right",
+                "noted",
+                "👍",
+                "✓",
+                "✔",
+                "k",
+                "ha",
+                "haan",
+            }
             if text.lower().strip() in _CONFIRM_SET:
                 log.info("[CTRL] commit notif reply: confirmation — no action needed")
             else:
@@ -441,8 +457,10 @@ async def _handle_control_message(
                         ).fetchone()
                     if _orig:
                         from fleet_pipeline.pipeline.wa_notifier import (
-                            _post_send_reply, _resolve_group_jid,
+                            _post_send_reply,
+                            _resolve_group_jid,
                         )
+
                         _notif_jid = _resolve_group_jid(ctrl_jid)
                         asyncio.create_task(
                             _process_and_broadcast(
@@ -490,12 +508,44 @@ async def _handle_control_message(
                 ts = now_ist()
 
             sd = ShiftDetector(conn)
+            new_shift = None
             if signal == "start":
                 sd._start_new(ts, method="wa_signal", raw_text=text)
                 new_shift = sd._active
+                if new_shift:
+                    conn.execute(
+                        """INSERT INTO shift_events
+                           (shift_event_id, shift_id, status, timestamp_iso,
+                            commit_status, wa_message_id, site_id, site_ids_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            f"shift_start_{new_shift['shift_id']}",
+                            new_shift["shift_id"],
+                            "SHIFT_START",
+                            ts.isoformat(),
+                            "COMMITTED",
+                            wa_message_id,
+                            new_shift.get("default_site_id"),
+                            new_shift.get("default_site_ids"),
+                        ),
+                    )
             else:
-                # Capture shift before ending for notification
                 new_shift = sd._active
+                if new_shift:
+                    conn.execute(
+                        """INSERT INTO shift_events
+                           (shift_event_id, shift_id, status, timestamp_iso,
+                            commit_status, wa_message_id)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            f"shift_end_{new_shift['shift_id']}",
+                            new_shift["shift_id"],
+                            "SHIFT_END",
+                            ts.isoformat(),
+                            "COMMITTED",
+                            wa_message_id,
+                        ),
+                    )
                 sd._end(ts)
 
             conn.commit()
@@ -516,6 +566,7 @@ async def _handle_control_message(
                         send_summary_to_group,
                         _resolve_group_jid,
                     )
+
                     _sum_jid = _resolve_group_jid(ctrl_jid)
                     if _sum_jid:
                         send_summary_to_group(_sum_jid, DB_PATH)
@@ -532,22 +583,30 @@ async def _handle_control_message(
 
     # ── Standalone shift control words (not replies, not shift signals) ────────
     # "no start" / "no end" / "resume" as plain standalone messages
-    _SA_NO_START = re.compile(r"^\s*(no\s+start|don.?t\s+start|cancel\s+(the\s+)?shift)\s*$", re.I)
-    _SA_NO_END   = re.compile(r"^\s*(no\s+end|don.?t\s+end|cancel\s+(the\s+)?end)\s*$", re.I)
-    _SA_RESUME   = re.compile(r"^\s*(resume|resume\s+(shift|last|it))\s*$", re.I)
+    _SA_NO_START = re.compile(
+        r"^\s*(no\s+start|don.?t\s+start|cancel\s+(the\s+)?shift)\s*$", re.I
+    )
+    _SA_NO_END = re.compile(
+        r"^\s*(no\s+end|don.?t\s+end|cancel\s+(the\s+)?end)\s*$", re.I
+    )
+    _SA_RESUME = re.compile(r"^\s*(resume|resume\s+(shift|last|it))\s*$", re.I)
 
     if not is_reply:
         if _SA_NO_START.match(text):
             operator_end(DB_PATH)
             log.info("[CTRL] Standalone 'no start' → shift ended")
-            await ws_manager.broadcast("shift_changed", {"reason": "standalone_no_start"})
+            await ws_manager.broadcast(
+                "shift_changed", {"reason": "standalone_no_start"}
+            )
             return
         if _SA_NO_END.match(text) or _SA_RESUME.match(text):
             resumed = operator_resume(DB_PATH)
             if resumed:
                 log.info("[CTRL] Standalone 'no end / resume' → shift resumed")
                 send_shift_notification(resumed, "resume", ctrl_jid, DB_PATH)
-                await ws_manager.broadcast("shift_changed", {"reason": "standalone_resume"})
+                await ws_manager.broadcast(
+                    "shift_changed", {"reason": "standalone_resume"}
+                )
             return
 
     # ── Summary request ───────────────────────────────────────────────────────
@@ -983,6 +1042,7 @@ async def wa_message_deleted(req: WAMessageDeletedRequest):
     wa_message_id = req.wa_message_id
 
     deleted_events = 0
+    deleted_shift_events = 0
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         result = conn.execute(
@@ -991,23 +1051,68 @@ async def wa_message_deleted(req: WAMessageDeletedRequest):
             (wa_message_id,),
         )
         deleted_events = result.rowcount
+        # Also mark shift_events as DELETED
+        se_result = conn.execute(
+            """UPDATE shift_events SET commit_status='DELETED'
+               WHERE wa_message_id=? AND commit_status='COMMITTED'""",
+            (wa_message_id,),
+        )
+        deleted_shift_events = se_result.rowcount
         conn.execute(
             "UPDATE raw_messages SET is_deleted=1 WHERE msg_id=?",
             (wa_message_id,),
         )
 
     log.info(
-        "[DELETE] WA message %s recalled — %d event(s) marked DELETED",
+        "[DELETE] WA message %s recalled — %d event(s), %d shift_event(s) marked DELETED",
         wa_message_id[:12],
         deleted_events,
+        deleted_shift_events,
     )
 
+    # Handle shift_event deletion specially
+    if deleted_shift_events > 0:
+        with sqlite3.connect(DB_PATH) as _sconn:
+            _sconn.row_factory = sqlite3.Row
+            se = _sconn.execute(
+                "SELECT shift_id, status FROM shift_events WHERE wa_message_id=? AND commit_status='DELETED'",
+                (wa_message_id,),
+            ).fetchone()
+            if se:
+                if se["status"] == "SHIFT_START":
+                    _sconn.execute(
+                        "UPDATE shifts SET ended_at=now WHERE shift_id=?",
+                        (se["shift_id"],),
+                    )
+                    _prev = _sconn.execute(
+                        """SELECT shift_id FROM shifts 
+                           WHERE ended_at IS NOT NULL 
+                           ORDER BY ended_at DESC LIMIT 1"""
+                    ).fetchone()
+                    if _prev:
+                        _sconn.execute(
+                            "UPDATE shifts SET ended_at=NULL WHERE shift_id=?",
+                            (_prev["shift_id"],),
+                        )
+                    log.info("[DELETE] SHIFT_START deleted → shifted to previous")
+                    await ws_manager.broadcast(
+                        "shift_changed", {"reason": "shift_start_deleted"}
+                    )
+                elif se["status"] == "SHIFT_END":
+                    # Shift end deleted → reopen the shift
+                    _sconn.execute(
+                        "UPDATE shifts SET ended_at=NULL WHERE shift_id=?",
+                        (se["shift_id"],),
+                    )
+                    log.info(
+                        "[DELETE] SHIFT_END deleted → shift reopened: %s",
+                        se["shift_id"],
+                    )
+                    await ws_manager.broadcast(
+                        "shift_changed", {"reason": "shift_end_deleted"}
+                    )
+
     if deleted_events > 0:
-        from fleet_pipeline.api.routes.fleet import invalidate_kpi_cache
-
-        invalidate_kpi_cache()
-        await ws_manager.broadcast("fleet_state_updated", {"source": "message_deleted"})
-
         # Notify control group about the deletion
         try:
             from fleet_pipeline.config import WA_CONTROL_GROUP_JID
@@ -1032,7 +1137,11 @@ async def wa_message_deleted(req: WAMessageDeletedRequest):
                     _raw_txt = _orig["raw_text"] or ""
                     _sender = _orig["sender_name"] or _sender
                     try:
-                        _ts_ist = to_ist(_orig["timestamp_iso"]) if _orig["timestamp_iso"] else ""
+                        _ts_ist = (
+                            to_ist(_orig["timestamp_iso"])
+                            if _orig["timestamp_iso"]
+                            else ""
+                        )
                     except Exception:
                         pass
                 send_deletion_notification(
