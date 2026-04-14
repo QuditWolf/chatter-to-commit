@@ -89,6 +89,98 @@ def _is_substantive_correction(text: str) -> bool:
     return stripped.lower() not in _NOISE_PHRASES
 
 
+def _parse_ts(ts_str: str):
+    """Parse an ISO timestamp string into a timezone-aware datetime, or None."""
+    if not ts_str:
+        return None
+    try:
+        from datetime import datetime, timezone
+        import pytz
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=pytz.timezone("Asia/Kolkata"))
+        return dt
+    except Exception:
+        return None
+
+
+def _fmt_ts(dt) -> str:
+    """Format a datetime back to an ISO string with IST offset."""
+    if dt is None:
+        return ""
+    try:
+        import pytz
+        ist = pytz.timezone("Asia/Kolkata")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ist)
+        return dt.astimezone(ist).isoformat()
+    except Exception:
+        return dt.isoformat()
+
+
+def _apply_inferred_timestamps(events: list) -> None:
+    """
+    Adjust timestamps on inferred events so they reflect approximate real times
+    rather than being identical to the triggering explicit event:
+
+        ENTER (inferred)  →  5 min before the next LS/US
+        LS    (inferred)  →  30 min before the next LO/UO
+        LO    (inferred)  →  30 min after  the preceding LS/US
+        LEFT  (inferred)  →  5 min after   the preceding LO/UO
+
+    Also force inferred=True on any event whose reasoning starts with "inferred:"
+    so that LLM-generated gap-fills are always tagged correctly.
+    """
+    from datetime import timedelta
+
+    # First pass: propagate inferred=True from reasoning text (LLM sometimes forgets the flag).
+    for ev in events:
+        if (ev.get("reasoning") or "").lstrip().lower().startswith("inferred"):
+            ev["inferred"] = True
+
+    # Build index by position for neighbour lookups
+    for i, ev in enumerate(events):
+        if not ev.get("inferred"):
+            continue
+        status = ev.get("status", "")
+
+        if status in ("ENTER",):
+            # 5 min before the LS/US that follows (look forward)
+            for j in range(i + 1, len(events)):
+                if events[j].get("status") in ("LS", "US"):
+                    anchor = _parse_ts(events[j].get("timestamp_effective", ""))
+                    if anchor:
+                        ev["timestamp_effective"] = _fmt_ts(anchor - timedelta(minutes=5))
+                    break
+
+        elif status in ("LS", "US"):
+            # 30 min before the LO/UO that follows (look forward)
+            for j in range(i + 1, len(events)):
+                if events[j].get("status") in ("LO", "UO"):
+                    anchor = _parse_ts(events[j].get("timestamp_effective", ""))
+                    if anchor:
+                        ev["timestamp_effective"] = _fmt_ts(anchor - timedelta(minutes=30))
+                    break
+
+        elif status in ("LO", "UO"):
+            # 30 min after the LS/US that precedes (look backward)
+            for j in range(i - 1, -1, -1):
+                if events[j].get("status") in ("LS", "US"):
+                    anchor = _parse_ts(events[j].get("timestamp_effective", ""))
+                    if anchor:
+                        ev["timestamp_effective"] = _fmt_ts(anchor + timedelta(minutes=30))
+                    break
+
+        elif status == "LEFT":
+            # 5 min after the LO/UO that precedes (look backward)
+            for j in range(i - 1, -1, -1):
+                if events[j].get("status") in ("LO", "UO"):
+                    anchor = _parse_ts(events[j].get("timestamp_effective", ""))
+                    if anchor:
+                        ev["timestamp_effective"] = _fmt_ts(anchor + timedelta(minutes=5))
+                    break
+
+
 class Committer:
     def __init__(
         self,
@@ -591,6 +683,16 @@ class Committer:
         # are committed in the correct sequence regardless of LLM output order.
         _STATUS_ORDER = {"ENTER": 0, "LS": 1, "US": 1, "LO": 2, "UO": 2, "LEFT": 3}
         events.sort(key=lambda e: _STATUS_ORDER.get(e.get("status", ""), 99))
+
+        # ── Inferred-event timestamp offsetting ──────────────────────────────
+        # Inferred events get approximate timestamps based on their neighbours:
+        #   ENTER (inferred)  →  5 min before the LS/US that follows it
+        #   LS    (inferred)  →  30 min before the LO/UO that follows it
+        #   LO    (inferred)  →  30 min after  the LS/US that precedes it
+        #   LEFT  (inferred)  →  5 min after  the LO/UO that precedes it
+        # Also force inferred=True on any event whose reasoning begins with
+        # "inferred:" so that LLM-generated inferences are always tagged.
+        _apply_inferred_timestamps(events)
 
         for ev in events:
             # Drop events with hallucinated / non-existent status values
