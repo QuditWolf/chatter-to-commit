@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS events (
     corrected          BOOLEAN DEFAULT FALSE,  -- (added via migration)
     corrected_at       TIMESTAMP,             -- (added via migration)
     shift_id           TEXT,                  -- (added via migration)
+    timestamp_approximate BOOLEAN DEFAULT FALSE, -- time back-calculated from multi-event batch (added via migration)
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

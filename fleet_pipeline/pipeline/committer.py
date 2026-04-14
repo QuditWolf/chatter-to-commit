@@ -179,6 +179,9 @@ def _spread_same_message_timestamps(events: list) -> None:
         for idx in range(len(tevs_sorted) - 1, -1, -1):
             tevs_sorted[idx]["timestamp_effective"] = _fmt_ts(current_ts)
             if idx > 0:
+                # All events except the anchor (last) had their time back-calculated.
+                # Tag them so the UI can show a "~" approximate-time indicator.
+                tevs_sorted[idx]["timestamp_approximate"] = True
                 # Gap is determined by THIS (later) event's status
                 current_ts = current_ts - _GAP_BEFORE.get(tevs_sorted[idx]["status"], timedelta(minutes=5))
 

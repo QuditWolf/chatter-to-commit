@@ -742,7 +742,8 @@ def gantt_data(shift_id: str = Query("")):
                       COALESCE(t.display_name, e.truck_alias, e.truck_id) as truck_name,
                       e.status, e.site_id,
                       COALESCE(s.display_name, e.site_id) as site_name,
-                      e.timestamp_effective, e.inferred, e.confidence
+                      e.timestamp_effective, e.inferred, e.confidence,
+                      e.timestamp_approximate
                FROM events e
                LEFT JOIN trucks t ON t.truck_id = e.truck_id
                LEFT JOIN sites  s ON s.site_id  = e.site_id
@@ -760,6 +761,7 @@ def gantt_data(shift_id: str = Query("")):
         for r in rows:
             ev = dict(r)
             ev["inferred"] = bool(ev["inferred"])
+            ev["timestamp_approximate"] = bool(ev.get("timestamp_approximate"))
             by_truck[ev["truck_id"]].append(ev)
             truck_names[ev["truck_id"]] = ev["truck_name"]
 

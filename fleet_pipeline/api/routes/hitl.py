@@ -37,9 +37,9 @@ router = APIRouter(prefix="/hitl", tags=["hitl"])
 # ---------------------------------------------------------------------------
 
 def _looks_like_code(s: str) -> bool:
-    """Return True if s looks like a bare truck/site code (no spaces, short, uppercase)."""
+    """Return True if s looks like a bare truck/site code (no spaces, short, alphanumeric)."""
     s = s.strip()
-    return len(s) <= 10 and s.replace("_", "").replace("-", "").isalnum() and s == s.upper()
+    return len(s) <= 10 and s.replace("_", "").replace("-", "").isalnum()
 
 
 _AFFIRMATIVE = frozenset({
@@ -351,8 +351,18 @@ def _handle_unknown_truck_answer(conn, answer: str, context: dict, event_id: Opt
             _register_new_truck(conn, truck_id.strip(), display_name.strip(), aliases, event_id)
         return
 
-    # Treat answer as existing truck_id; add context alias to it
+    # Treat answer as existing truck_id; resolve alias → canonical truck_id if needed
     truck_id = answer.upper()
+    if not conn.execute("SELECT 1 FROM trucks WHERE truck_id=?", (truck_id,)).fetchone():
+        import json as _json
+        for row in conn.execute("SELECT truck_id, aliases FROM trucks WHERE is_active=1"):
+            try:
+                aliases_list = _json.loads(row["aliases"] or "[]")
+            except Exception:
+                aliases_list = []
+            if truck_id in [a.upper() for a in aliases_list]:
+                truck_id = row["truck_id"]
+                break
     truck_alias = context.get("truck_alias") or context.get("llm_truck_id", "")
     if truck_alias:
         try:
@@ -385,8 +395,19 @@ def _handle_unknown_site_answer(conn, answer: str, context: dict, event_id: Opti
                                site_type.strip(), aliases, event_id)
         return
 
-    # Treat answer as existing site_id; add context alias to it
+    # Treat answer as existing site_id; resolve alias → canonical site_id if needed
     site_id = answer.upper()
+    # Check if the supplied code is an alias rather than a primary site_id
+    if not conn.execute("SELECT 1 FROM sites WHERE site_id=?", (site_id,)).fetchone():
+        import json as _json
+        for row in conn.execute("SELECT site_id, aliases FROM sites WHERE is_active=1"):
+            try:
+                aliases_list = _json.loads(row["aliases"] or "[]")
+            except Exception:
+                aliases_list = []
+            if site_id in [a.upper() for a in aliases_list]:
+                site_id = row["site_id"]
+                break
     site_alias = context.get("site_alias") or context.get("llm_site_id", "")
     if site_alias:
         try:

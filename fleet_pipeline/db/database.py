@@ -211,8 +211,8 @@ def insert_event(conn: sqlite3.Connection, ev: Dict[str, Any]) -> None:
            (event_id, msg_id, truck_id, truck_alias, status, site_id, site_alias,
             material, timestamp_effective, inferred, confidence, reasoning,
             commit_status, corrects_event_id, processing_id, simulation_run_id,
-            wa_message_id, commit_path, shift_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            wa_message_id, commit_path, shift_id, timestamp_approximate)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ev["event_id"],
             ev.get("msg_id"),
@@ -233,6 +233,7 @@ def insert_event(conn: sqlite3.Connection, ev: Dict[str, Any]) -> None:
             ev.get("wa_message_id"),
             ev.get("commit_path"),
             ev.get("shift_id"),
+            bool(ev.get("timestamp_approximate", False)),
         ),
     )
 

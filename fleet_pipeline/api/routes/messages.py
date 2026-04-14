@@ -108,7 +108,7 @@ def list_commits(
                        e.status, e.site_id, e.site_alias, e.confidence,
                        e.commit_status, e.commit_path, e.inferred, e.reasoning,
                        e.corrected, e.corrected_at, e.shift_id,
-                       e.timestamp_effective, e.created_at,
+                       e.timestamp_effective, e.timestamp_approximate, e.created_at,
                        r.raw_text, r.sender_name, r.timestamp_iso,
                        r.quoted_wa_message_id,
                        qr.raw_text as quoted_raw_text,

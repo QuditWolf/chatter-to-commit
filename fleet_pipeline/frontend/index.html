@@ -1911,6 +1911,7 @@ async function loadCommits() {
                    : ev.commit_status === 'FLAGGED'   ? 'amber' : 'red';
       const srcColor = SOURCE_COLORS[ev.commit_source] || 'var(--color-text-secondary)';
       const infTag = ev.inferred ? `<span style="font-size:9px;padding:1px 4px;border-radius:8px;background:#F5F0FF;color:#5B1FA3;margin-left:4px">inferred</span>` : '';
+      const approxPrefix = ev.timestamp_approximate ? '<span style="color:#B45309;font-weight:600" title="Timestamp back-calculated from multi-event message">~</span>' : '';
       const reason = ev.reasoning ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:2px">${escHtml(ev.reasoning)}</div>` : '';
       const quotedBlock = ev.quoted_raw_text
         ? `<div style="font-size:10px;font-family:var(--font-mono);color:var(--color-text-secondary);border-left:2px solid var(--color-border-secondary);padding-left:6px;margin-bottom:2px;opacity:0.8">↩ ${escHtml(ev.quoted_raw_text)}</div>`
@@ -1922,7 +1923,7 @@ async function loadCommits() {
         <button class="save-alias-btn" style="font-size:10px;padding:2px 7px;color:var(--color-status-held)" onclick="deleteCommit('${eid}')">Del</button>
       </div>`;
       return `<tr>
-        <td style="font-size:11px;color:var(--color-text-secondary)">${fmtTime(ev.timestamp_effective)}</td>
+        <td style="font-size:11px;color:var(--color-text-secondary)">${approxPrefix}${fmtTime(ev.timestamp_effective)}</td>
         <td style="font-weight:500">${escHtml(shortTruck(ev.truck_alias, ev.truck_id))}</td>
         <td><span class="pill ${statusPillClass(ev.status)}">${statusLabel(ev.status)}</span>${infTag}</td>
         <td style="font-size:12px">${escHtml(ev.site_name||ev.site_alias||ev.site_id||'–')}</td>
@@ -2607,17 +2608,26 @@ async function refreshGantt(shiftId) {
         }
 
         // Dot markers (only for non-inferred events)
+        const _dotTitle = (ev, ts) => {
+          const approx = ev.timestamp_approximate ? '~ ' : '';
+          const t = ts ? fmtTime(new Date(ts).toISOString()) : '';
+          return `<title>${approx}${ev.status} ${t}</title>`;
+        };
         if (enterEv) {
-          html += `<circle cx="${pct(enterT)}%" cy="${mid}" r="${dotR}" fill="white" stroke="#888780" stroke-width="1.5"/>`;
+          const stroke = enterEv.timestamp_approximate ? '#B45309' : '#888780';
+          html += `<circle cx="${pct(enterT)}%" cy="${mid}" r="${dotR}" fill="white" stroke="${stroke}" stroke-width="1.5">${_dotTitle(enterEv, enterT)}</circle>`;
         }
         if (lsEv) {
-          html += `<circle cx="${pct(lsT)}%" cy="${mid}" r="${dotR}" fill="${barColor}" stroke="white" stroke-width="1.5"/>`;
+          const stroke = lsEv.timestamp_approximate ? '#B45309' : 'white';
+          html += `<circle cx="${pct(lsT)}%" cy="${mid}" r="${dotR}" fill="${barColor}" stroke="${stroke}" stroke-width="1.5">${_dotTitle(lsEv, lsT)}</circle>`;
         }
         if (loEv) {
-          html += `<circle cx="${pct(loT)}%" cy="${mid}" r="${dotR}" fill="${barColor}" stroke="white" stroke-width="1.5"/>`;
+          const stroke = loEv.timestamp_approximate ? '#B45309' : 'white';
+          html += `<circle cx="${pct(loT)}%" cy="${mid}" r="${dotR}" fill="${barColor}" stroke="${stroke}" stroke-width="1.5">${_dotTitle(loEv, loT)}</circle>`;
         }
         if (leftEv) {
-          html += `<circle cx="${pct(leftT)}%" cy="${mid}" r="${dotR}" fill="white" stroke="#888780" stroke-width="1.5"/>`;
+          const stroke = leftEv.timestamp_approximate ? '#B45309' : '#888780';
+          html += `<circle cx="${pct(leftT)}%" cy="${mid}" r="${dotR}" fill="white" stroke="${stroke}" stroke-width="1.5">${_dotTitle(leftEv, leftT)}</circle>`;
         }
       }
 
