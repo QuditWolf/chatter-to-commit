@@ -73,6 +73,9 @@ _SHIFT_END_RE = [
     re.compile(r"\ball\s+(trucks?|trolleys?)\s+left\b", re.I),
 ]
 
+# Fleet status auto-start: any message containing a cycle verb word triggers auto-start.
+_FLEET_STATUS_RE = re.compile(r"\b(enter|ls|lo|left|us|uo)\b", re.I)
+
 
 def detect_shift_signal(text: str) -> Optional[str]:
     """Return 'start' | 'end' | None."""
@@ -126,9 +129,10 @@ class ShiftDetector:
             self._last_ts = ts
             return None
 
-        # 2. No shift at all → start one (inactivity gap no longer auto-starts a shift;
-        #    shifts start only via explicit WA signals or operator action)
-        if not self._active:
+        # 2. No active shift → auto-start only if the message looks like a real fleet
+        #    status update (truck + verb pattern). Noise, tallies, and other messages
+        #    do NOT auto-start a shift.
+        if not self._active and _FLEET_STATUS_RE.search(raw_text or ""):
             self._start_new(ts, method="auto_start", raw_text=raw_text)
 
         self._last_ts = ts
@@ -139,7 +143,7 @@ class ShiftDetector:
     def _load_active(self):
         try:
             row = self.conn.execute(
-                "SELECT * FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+                "SELECT * FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0) ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
             return dict(row) if row else None
         except Exception:

@@ -163,7 +163,7 @@ async def lifespan(application: FastAPI):
             try:
                 with _sq3.connect(_DB_PATH2) as _chk:
                     _active = _chk.execute(
-                        "SELECT shift_id FROM shifts WHERE ended_at IS NULL LIMIT 1"
+                        "SELECT shift_id FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1"
                     ).fetchone()
                 if not _active:
                     log.debug("Periodic summary: no active shift — skipping")
@@ -202,7 +202,7 @@ async def lifespan(application: FastAPI):
                 _conn.row_factory = _sq3.Row
                 # Active shift
                 _shift = _conn.execute(
-                    "SELECT shift_id FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+                    "SELECT shift_id FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0) ORDER BY started_at DESC LIMIT 1"
                 ).fetchone()
                 if not _shift:
                     _conn.close()

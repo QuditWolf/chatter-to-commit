@@ -265,16 +265,17 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
 
             shift = conn.execute(
                 """SELECT shift_id, shift_number, shift_name
-                   FROM shifts WHERE ended_at IS NULL
+                   FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0)
                    ORDER BY started_at DESC LIMIT 1"""
             ).fetchone()
 
             is_last = False
             if not shift:
-                # No active shift - get the last shift
+                # No active shift - get the last non-deleted shift
                 shift = conn.execute(
                     """SELECT shift_id, shift_number, shift_name, ended_at
-                       FROM shifts ORDER BY started_at DESC LIMIT 1"""
+                       FROM shifts WHERE (is_deleted IS NULL OR is_deleted = 0)
+                       ORDER BY started_at DESC LIMIT 1"""
                 ).fetchone()
                 is_last = True
 
