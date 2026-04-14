@@ -118,6 +118,71 @@ def _fmt_ts(dt) -> str:
         return dt.isoformat()
 
 
+def _spread_same_message_timestamps(events: list) -> None:
+    """
+    When a single message produces multiple explicit (non-inferred) events for
+    the same truck that all share the same timestamp_effective, back-calculate
+    earlier events from the last one in the loading/unloading sequence.
+
+    The last (most-advanced) event keeps the message timestamp; earlier events
+    are stepped back using the same durations as inferred events:
+        … → LS/US  : 5 min before LS (i.e. ENTER–LS gap)
+        … → LO/UO  : 30 min before LO (i.e. LS–LO gap)
+        … → LEFT   : 5 min before LEFT (i.e. LO–LEFT gap)
+
+    Example — message "LS LO LEFT" at T:
+        LEFT  = T
+        LO    = T − 5 min
+        LS    = T − 5 − 30 = T − 35 min
+
+    This only fires when all events for a truck share the exact same timestamp
+    (meaning the LLM copied the message timestamp verbatim for each one), and
+    only affects non-inferred events (inferred events are handled separately by
+    _apply_inferred_timestamps which resolves against their neighbours).
+    """
+    from collections import defaultdict
+    from datetime import timedelta
+
+    # Gap that precedes each status (how long before this status the prior one was)
+    _GAP_BEFORE = {
+        "LS":   timedelta(minutes=5),
+        "US":   timedelta(minutes=5),
+        "LO":   timedelta(minutes=30),
+        "UO":   timedelta(minutes=30),
+        "LEFT": timedelta(minutes=5),
+    }
+    _STATUS_ORDER = {"ENTER": 0, "LS": 1, "US": 1, "LO": 2, "UO": 2, "LEFT": 3}
+
+    # Group non-inferred, valid-status events by truck_id
+    by_truck: dict = defaultdict(list)
+    for i, ev in enumerate(events):
+        if not ev.get("inferred") and ev.get("truck_id") and ev.get("status") in _STATUS_ORDER:
+            by_truck[ev["truck_id"]].append(ev)
+
+    for truck_id, tevs in by_truck.items():
+        if len(tevs) < 2:
+            continue
+        # Only spread if all share the exact same timestamp_effective
+        ts_vals = {ev.get("timestamp_effective", "") for ev in tevs}
+        if len(ts_vals) != 1:
+            continue
+        shared_ts = next(iter(ts_vals))
+        anchor = _parse_ts(shared_ts)
+        if not anchor:
+            continue
+
+        # Sort earliest-first by status order, stable for ties
+        tevs_sorted = sorted(tevs, key=lambda e: _STATUS_ORDER.get(e.get("status", ""), 99))
+
+        # Last event keeps the anchor; work backwards assigning timestamps
+        current_ts = anchor
+        for idx in range(len(tevs_sorted) - 1, -1, -1):
+            tevs_sorted[idx]["timestamp_effective"] = _fmt_ts(current_ts)
+            if idx > 0:
+                # Gap is determined by THIS (later) event's status
+                current_ts = current_ts - _GAP_BEFORE.get(tevs_sorted[idx]["status"], timedelta(minutes=5))
+
+
 def _apply_inferred_timestamps(events: list) -> None:
     """
     Adjust timestamps on inferred events so they reflect approximate real times
@@ -685,6 +750,12 @@ class Committer:
         events.sort(key=lambda e: _STATUS_ORDER.get(e.get("status", ""), 99))
 
         # ── Inferred-event timestamp offsetting ──────────────────────────────
+        # When a message contains multiple explicit events for the same truck
+        # (e.g. "LS LO LEFT"), they all arrive with the same timestamp_effective.
+        # Back-calculate earlier events from the last one in the sequence so the
+        # timeline is realistic: LEFT=T, LO=T−5min, LS=T−35min, etc.
+        _spread_same_message_timestamps(events)
+
         # Inferred events get approximate timestamps based on their neighbours:
         #   ENTER (inferred)  →  5 min before the LS/US that follows it
         #   LS    (inferred)  →  30 min before the LO/UO that follows it
@@ -692,6 +763,8 @@ class Committer:
         #   LEFT  (inferred)  →  5 min after  the LO/UO that precedes it
         # Also force inferred=True on any event whose reasoning begins with
         # "inferred:" so that LLM-generated inferences are always tagged.
+        # Runs after _spread_same_message_timestamps so inferred ENTERs anchor
+        # against the already-adjusted explicit LS timestamp.
         _apply_inferred_timestamps(events)
 
         for ev in events:
