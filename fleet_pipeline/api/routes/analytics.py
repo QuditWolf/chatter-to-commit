@@ -7,7 +7,7 @@ GET /analytics/fleet-map  — current truck positions for map overlay
 
 import json
 from collections import defaultdict
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from fleet_pipeline.config import DB_PATH
 from fleet_pipeline.db.database import db_conn
@@ -388,7 +388,7 @@ def site_state():
 
 
 @router.get("/shift-summary")
-def shift_summary():
+def shift_summary(shift_id: str = Query("")):
     """
     Shift summary for the operator report card.
 
@@ -404,10 +404,16 @@ def shift_summary():
     - text:             preformatted copyable summary string
     """
     with db_conn(DB_PATH) as conn:
-        # Current shift
-        shift_row = conn.execute(
-            "SELECT shift_id, shift_number, started_at, shift_name FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
-        ).fetchone()
+        # Resolve shift: explicit param → active shift fallback
+        if shift_id:
+            shift_row = conn.execute(
+                "SELECT shift_id, shift_number, started_at, ended_at, shift_name FROM shifts WHERE shift_id=?",
+                (shift_id,),
+            ).fetchone()
+        else:
+            shift_row = conn.execute(
+                "SELECT shift_id, shift_number, started_at, ended_at, shift_name FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
         shift_id = shift_row["shift_id"] if shift_row else None
         shift_name = (
             (shift_row["shift_name"] or f"Shift {shift_row['shift_number']}")
@@ -415,7 +421,7 @@ def shift_summary():
             else None
         )
 
-        # If no active shift, return empty data
+        # If no shift found, return empty data
         if not shift_id:
             return {
                 "loaded_by_site": {},
@@ -634,6 +640,8 @@ def shift_summary():
     return {
         "shift_id": shift_id,
         "shift_name": shift_name,
+        "started_at": shift_row["started_at"] if shift_row else None,
+        "ended_at": shift_row["ended_at"] if shift_row else None,
         "total_loaded": total_loaded,
         "loaded_by_site": loaded_by_site,
         "reached_by_site": reached_by_site,
@@ -642,6 +650,189 @@ def shift_summary():
         "in_unloading": in_unloading_trucks,
         "truck_cycles": truck_cycles,
         "text": text,
+    }
+
+
+def _group_loading_cycles(events: list) -> list:
+    """
+    Group a sorted list of truck events into loading cycles.
+
+    A cycle is ENTER → LS → LO → LEFT (each optional).
+    Rules:
+    - A new cycle starts on ENTER or LS when the previous cycle was closed
+      (i.e. last meaningful event was LO or LEFT).
+    - Inferred events are flagged but still anchor cycle boundaries (they
+      should NOT be displayed as visual markers on the gantt).
+    - Returns a list of cycle dicts: {enter, ls, lo, left} each being
+      an event dict (or None), plus cycle_number (1-based).
+    """
+    cycles = []
+    cur = {"enter": None, "ls": None, "lo": None, "left": None}
+    _OPEN_STATUSES = {"ENTER", "LS"}
+    _CLOSE_STATUSES = {"LO", "LEFT"}
+
+    def _flush():
+        if any(v is not None for v in cur.values()):
+            cycles.append({**cur})
+
+    for ev in events:
+        s = ev["status"]
+        if s == "ENTER":
+            # Start a new cycle if prev was closed or empty
+            if cur["lo"] is not None or cur["left"] is not None:
+                _flush()
+                cur = {"enter": None, "ls": None, "lo": None, "left": None}
+            cur["enter"] = ev
+        elif s == "LS":
+            # Start new cycle if prev was already closed
+            if cur["lo"] is not None or cur["left"] is not None:
+                _flush()
+                cur = {"enter": None, "ls": None, "lo": None, "left": None}
+            cur["ls"] = ev
+        elif s == "LO":
+            cur["lo"] = ev
+        elif s == "LEFT":
+            cur["left"] = ev
+            _flush()
+            cur = {"enter": None, "ls": None, "lo": None, "left": None}
+
+    # flush trailing open cycle
+    if any(v is not None for v in cur.values()):
+        _flush()
+
+    for i, c in enumerate(cycles):
+        c["cycle_number"] = i + 1
+
+    return cycles
+
+
+@router.get("/gantt")
+def gantt_data(shift_id: str = Query("")):
+    """
+    Gantt chart data for a shift.
+
+    Returns per-truck loading cycles with ENTER/LS/LO/LEFT timestamps.
+    Inferred events are included in cycle boundaries but marked inferred=true
+    so the frontend can skip rendering them as visual markers.
+
+    Also returns shift start/end for the time axis.
+    """
+    with db_conn(DB_PATH) as conn:
+        # Resolve shift
+        if shift_id:
+            shift_row = conn.execute(
+                "SELECT shift_id, started_at, ended_at, shift_name, shift_number FROM shifts WHERE shift_id=?",
+                (shift_id,),
+            ).fetchone()
+        else:
+            shift_row = conn.execute(
+                "SELECT shift_id, started_at, ended_at, shift_name, shift_number FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+
+        if not shift_row:
+            return {"shift_id": None, "trucks": [], "shift_start": None, "shift_end": None}
+
+        sid = shift_row["shift_id"]
+        shift_start = shift_row["started_at"]
+        shift_end = shift_row["ended_at"]
+
+        # All COMMITTED/FLAGGED loading-cycle events for this shift, ordered by time
+        rows = conn.execute(
+            """SELECT e.event_id, e.truck_id,
+                      COALESCE(t.display_name, e.truck_alias, e.truck_id) as truck_name,
+                      e.status, e.site_id,
+                      COALESCE(s.display_name, e.site_id) as site_name,
+                      e.timestamp_effective, e.inferred, e.confidence
+               FROM events e
+               LEFT JOIN trucks t ON t.truck_id = e.truck_id
+               LEFT JOIN sites  s ON s.site_id  = e.site_id
+               WHERE e.shift_id = ?
+                 AND e.commit_status IN ('COMMITTED', 'FLAGGED')
+                 AND e.status IN ('ENTER', 'LS', 'LO', 'LEFT')
+                 AND e.truck_id IS NOT NULL
+               ORDER BY e.truck_id, e.timestamp_effective""",
+            (sid,),
+        ).fetchall()
+
+        # Group events by truck
+        by_truck = defaultdict(list)
+        truck_names = {}
+        for r in rows:
+            ev = dict(r)
+            ev["inferred"] = bool(ev["inferred"])
+            by_truck[ev["truck_id"]].append(ev)
+            truck_names[ev["truck_id"]] = ev["truck_name"]
+
+        # Average loading time per truck (LS→LO minutes, non-inferred only)
+        avg_rows = conn.execute(
+            """SELECT ls.truck_id,
+                      ROUND(AVG((strftime('%s', lo.timestamp_effective)
+                               - strftime('%s', ls.timestamp_effective)) / 60.0), 1) as avg_min,
+                      COUNT(*) as cycles
+               FROM events ls
+               JOIN events lo
+                 ON lo.truck_id = ls.truck_id
+                AND lo.shift_id = ls.shift_id
+                AND lo.status = 'LO'
+                AND lo.commit_status IN ('COMMITTED', 'FLAGGED')
+                AND lo.inferred = 0
+                AND lo.timestamp_effective > ls.timestamp_effective
+                AND lo.timestamp_effective = (
+                      SELECT MIN(x.timestamp_effective) FROM events x
+                      WHERE x.truck_id = ls.truck_id AND x.shift_id = ls.shift_id
+                        AND x.status = 'LO' AND x.commit_status IN ('COMMITTED','FLAGGED')
+                        AND x.inferred = 0
+                        AND x.timestamp_effective > ls.timestamp_effective
+                    )
+               WHERE ls.shift_id = ?
+                 AND ls.status = 'LS'
+                 AND ls.commit_status IN ('COMMITTED', 'FLAGGED')
+                 AND ls.inferred = 0
+               GROUP BY ls.truck_id""",
+            (sid,),
+        ).fetchall()
+        avg_by_truck = {r["truck_id"]: {"avg_min": r["avg_min"], "cycles": r["cycles"]} for r in avg_rows}
+
+    trucks_out = []
+    for truck_id, evs in sorted(by_truck.items(), key=lambda x: truck_names.get(x[0], x[0])):
+        cycles = _group_loading_cycles(evs)
+        stats = avg_by_truck.get(truck_id, {"avg_min": None, "cycles": 0})
+        trucks_out.append({
+            "truck_id": truck_id,
+            "truck_name": truck_names.get(truck_id, truck_id),
+            "cycles": cycles,
+            "avg_min": stats["avg_min"],
+            "total_loads": stats["cycles"],
+        })
+
+    return {
+        "shift_id": sid,
+        "shift_name": shift_row["shift_name"] or f"Shift {shift_row['shift_number']}",
+        "shift_start": shift_start,
+        "shift_end": shift_end,
+        "trucks": trucks_out,
+    }
+
+
+@router.get("/shifts")
+def list_shifts():
+    """All shifts ordered newest-first, for the shift selector."""
+    with db_conn(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT shift_id, shift_number, shift_name, started_at, ended_at FROM shifts ORDER BY started_at DESC"
+        ).fetchall()
+    return {
+        "shifts": [
+            {
+                "shift_id": r["shift_id"],
+                "shift_number": r["shift_number"],
+                "shift_name": r["shift_name"] or f"Shift {r['shift_number']}",
+                "started_at": r["started_at"],
+                "ended_at": r["ended_at"],
+                "active": r["ended_at"] is None,
+            }
+            for r in rows
+        ]
     }
 
 

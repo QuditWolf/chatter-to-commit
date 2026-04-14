@@ -127,7 +127,8 @@ async def lifespan(application: FastAPI):
                 log.warning("Auto-end shift check failed: %s", _exc)
 
     async def _periodic_summary_loop():
-        """Post a shift summary to the control group every 15 minutes."""
+        """Post a shift summary to the control group every 15 minutes (only when a shift is active)."""
+        import sqlite3 as _sq3
         from fleet_pipeline.config import (
             WA_CONTROL_GROUP_JID,
             WA_GROUP_JID,
@@ -142,17 +143,97 @@ async def lifespan(application: FastAPI):
             summary_jid = WA_CONTROL_GROUP_JID or WA_GROUP_JID
             if not summary_jid:
                 continue
+            # Only send when there is an active (open) shift
+            try:
+                _chk = _sq3.connect(_DB_PATH2)
+                _active = _chk.execute(
+                    "SELECT shift_id FROM shifts WHERE ended_at IS NULL LIMIT 1"
+                ).fetchone()
+                _chk.close()
+                if not _active:
+                    continue
+            except Exception as _chk_exc:
+                log.warning("Periodic summary shift-check failed: %s", _chk_exc)
+                continue
             try:
                 _send_summary(summary_jid, _DB_PATH2)
                 log.info("Periodic summary posted to %s", summary_jid)
             except Exception as _exc:
                 log.warning("Periodic summary post failed: %s", _exc)
 
+    async def _loading_alert_loop():
+        """Send a WA alert once per truck per shift when LS > 1 hour with no LO."""
+        import sqlite3 as _sq3
+        from fleet_pipeline.config import (
+            WA_CONTROL_GROUP_JID,
+            WA_GROUP_JID,
+            DB_PATH as _DB_PATH3,
+        )
+        from fleet_pipeline.pipeline.wa_notifier import _post_send_message, _resolve_group_jid
+
+        # Track which (shift_id, truck_id) pairs have been alerted this session
+        _alerted: set = set()
+
+        while True:
+            await asyncio.sleep(600)  # check every 10 minutes
+            alert_jid = _resolve_group_jid(WA_CONTROL_GROUP_JID or WA_GROUP_JID)
+            if not alert_jid:
+                continue
+            try:
+                _conn = _sq3.connect(_DB_PATH3)
+                _conn.row_factory = _sq3.Row
+                # Active shift
+                _shift = _conn.execute(
+                    "SELECT shift_id FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+                ).fetchone()
+                if not _shift:
+                    _conn.close()
+                    continue
+                sid = _shift["shift_id"]
+                # Trucks with LS > 1 hour ago and no subsequent LO/LEFT in this shift
+                _rows = _conn.execute(
+                    """SELECT e.truck_id, COALESCE(e.truck_alias, e.truck_id) as alias,
+                              e.timestamp_effective as ls_ts
+                       FROM events e
+                       WHERE e.shift_id=? AND e.status='LS'
+                         AND e.commit_status IN ('COMMITTED','FLAGGED')
+                         AND (strftime('%s','now') - strftime('%s',e.timestamp_effective)) > 3600
+                         AND NOT EXISTS (
+                           SELECT 1 FROM events e2
+                           WHERE e2.truck_id=e.truck_id AND e2.shift_id=?
+                             AND e2.status IN ('LO','LEFT')
+                             AND e2.timestamp_effective >= e.timestamp_effective
+                             AND e2.commit_status IN ('COMMITTED','FLAGGED')
+                         )
+                       GROUP BY e.truck_id
+                       ORDER BY e.truck_alias""",
+                    (sid, sid),
+                ).fetchall()
+                _conn.close()
+                for _r in _rows:
+                    key = (sid, _r["truck_id"])
+                    if key in _alerted:
+                        continue
+                    _alerted.add(key)
+                    alias = _r["alias"] or _r["truck_id"]
+                    try:
+                        _post_send_message(
+                            alert_jid,
+                            f"⚠️ *{alias}* has been in loading for more than 1 hour — has it been loaded yet?",
+                        )
+                        log.info("Loading alert sent for truck %s shift %s", alias, sid[:8])
+                    except Exception as _ae:
+                        log.warning("Loading alert send failed: %s", _ae)
+            except Exception as _exc:
+                log.warning("Loading alert check failed: %s", _exc)
+
     task = asyncio.create_task(_auto_end_shift_loop())
     summary_task = asyncio.create_task(_periodic_summary_loop())
+    alert_task = asyncio.create_task(_loading_alert_loop())
     yield
     task.cancel()
     summary_task.cancel()
+    alert_task.cancel()
 
 
 app = FastAPI(

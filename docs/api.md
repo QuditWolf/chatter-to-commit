@@ -123,46 +123,55 @@ Per-site truck counts and current occupants.
 ## Messages
 
 ### `GET /api/messages`
-Message-to-commit map with pagination.
+Message-to-commit map (operator panel) with pagination.
 
 **Query params:**
 | Param | Default | Description |
 |-------|---------|-------------|
-| `limit` | `50` | Results per page |
-| `offset` | `0` | Pagination offset |
-| `truck_id` | — | Filter by truck |
-| `site_id` | — | Filter by site |
-| `status` | — | Filter by event status |
+| `page` | `1` | Page number |
+| `limit` | `20` | Results per page |
+| `status` | `all` | Filter: `all`, `committed`, `held`, `flagged`, `corrected` |
+| `search` | — | Full-text search across message text, truck/site IDs |
 | `hide_noise` | `false` | Hide NOISE-classified messages |
+| `shift_id` | — | Filter to messages with events in this shift |
 
-**Response:**
+**Response items include:** `quoted_raw_text` — the text of the message this is replying to (null for non-replies).
+
 ```json
 {
   "items": [
     {
       "msg_id": "uuid",
-      "raw_text": "D LS SOC",
+      "raw_text": "LO",
+      "quoted_raw_text": "D LS KN4",
       "sender_name": "+91...",
       "timestamp_iso": "...",
       "events": [
         {
           "event_id": "uuid",
           "truck_id": "TD",
-          "status": "LS",
-          "site_id": "SOC",
-          "confidence": 0.95,
-          "commit_status": "COMMITTED",
-          "reasoning": "explicit D LS SOC",
+          "status": "LO",
+          "site_id": "KN4",
+          "confidence": 0.75,
+          "commit_status": "FLAGGED",
+          "reasoning": "truck from reply chain (D LS KN4)",
           "inferred": false
         }
       ]
     }
   ],
   "total": 842,
-  "offset": 0,
-  "limit": 50
+  "page": 1,
+  "pages": 43
 }
 ```
+
+### `GET /api/commits-log`
+Ordered event log with source messages.
+
+**Query params:** `page`, `limit`, `truck_id`, `site_id`, `status`, `commit_status`, `search`, `shift_id`
+
+Response items include `quoted_raw_text` (text of quoted/replied-to message, shown in UI as `↩ ...` prefix).
 
 ---
 
@@ -309,13 +318,17 @@ Update shift. Body: `{ "start_time": "06:00", "expected_end": "09:00", "wa_keywo
 ## Analytics
 
 ### `GET /analytics/shift-summary`
-Current shift summary used in the dashboard report panel.
+Shift summary for the dashboard report panel.
+
+**Query params:** `shift_id` (optional — defaults to current active shift)
 
 **Response:**
 ```json
 {
   "shift_id": "uuid",
   "shift_name": "Shift 1",
+  "started_at": "2026-04-14T06:00:00",
+  "ended_at": null,
   "total_loaded": 14,
   "loaded_by_site":   { "KN4": { "name": "Kua No. 4", "count": 8 }, "SOC": { "name": "SOC", "count": 6 } },
   "reached_by_site":  { "BG":  { "name": "Bhandara Ground", "count": 12 } },
@@ -326,6 +339,51 @@ Current shift summary used in the dashboard report panel.
   "text": "── Shift 1 summary ──\nTotal Trolleys Loaded (all sites) = 14\n  Trolleys Loaded @Kua No. 4 = 8\n..."
 }
 ```
+
+### `GET /analytics/shifts`
+All shifts ordered newest-first, for the dashboard shift selector.
+
+**Response:**
+```json
+{
+  "shifts": [
+    { "shift_id": "uuid", "shift_number": 3, "shift_name": "Shift 3", "started_at": "...", "ended_at": null, "active": true },
+    { "shift_id": "uuid", "shift_number": 2, "shift_name": "Shift 2", "started_at": "...", "ended_at": "...", "active": false }
+  ]
+}
+```
+
+### `GET /analytics/gantt`
+Per-truck loading cycles for the Gantt chart, grouped into ENTER→LS→LO→LEFT sequences.
+
+**Query params:** `shift_id` (optional — defaults to current active shift)
+
+**Response:**
+```json
+{
+  "shift_id": "uuid",
+  "shift_name": "Shift 1",
+  "shift_start": "2026-04-14T06:00:00",
+  "shift_end": null,
+  "trucks": [
+    {
+      "truck_id": "TA", "truck_name": "A",
+      "avg_min": 42.5, "total_loads": 3,
+      "cycles": [
+        {
+          "cycle_number": 1,
+          "enter": { "event_id": "...", "status": "ENTER", "timestamp_effective": "...", "inferred": false, ... },
+          "ls":    { "event_id": "...", "status": "LS",    "timestamp_effective": "...", "inferred": false, ... },
+          "lo":    { "event_id": "...", "status": "LO",    "timestamp_effective": "...", "inferred": false, ... },
+          "left":  null
+        }
+      ]
+    }
+  ]
+}
+```
+
+Inferred events (pipeline auto-injected) have `inferred: true` and are used for cycle geometry but not rendered as visual markers in the UI.
 
 ---
 

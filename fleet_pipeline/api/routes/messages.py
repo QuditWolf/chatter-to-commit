@@ -64,6 +64,7 @@ def list_commits(
     status: str = Query(""),  # ENTER | LS | LO | LEFT | US | UO
     commit_status: str = Query(""),  # COMMITTED | FLAGGED | HELD
     search: str = Query(""),
+    shift_id: str = Query(""),
 ):
     """
     Ordered commit log (start → end).
@@ -84,6 +85,9 @@ def list_commits(
     if commit_status:
         where.append("e.commit_status = ?")
         params.append(commit_status.upper())
+    if shift_id:
+        where.append("e.shift_id = ?")
+        params.append(shift_id)
     if search:
         like = f"%{search}%"
         where.append(
@@ -106,10 +110,13 @@ def list_commits(
                        e.corrected, e.corrected_at, e.shift_id,
                        e.timestamp_effective, e.created_at,
                        r.raw_text, r.sender_name, r.timestamp_iso,
+                       r.quoted_wa_message_id,
+                       qr.raw_text as quoted_raw_text,
                        t.display_name as truck_name,
                        s.display_name as site_name
                 FROM events e
-                LEFT JOIN raw_messages r ON r.msg_id = e.msg_id
+                LEFT JOIN raw_messages r  ON r.msg_id  = e.msg_id
+                LEFT JOIN raw_messages qr ON qr.msg_id = r.quoted_wa_message_id
                 LEFT JOIN trucks t ON t.truck_id = e.truck_id
                 LEFT JOIN sites  s ON s.site_id  = e.site_id
                 {where_sql}
@@ -162,6 +169,7 @@ def list_messages(
     status: str = Query("all"),  # all | committed | held | flagged | corrected
     search: str = Query(""),
     hide_noise: bool = Query(False),
+    shift_id: str = Query(""),
 ):
     """Paginated message-commit map for the operator panel."""
     with db.db_conn(DB_PATH) as conn:
@@ -172,6 +180,7 @@ def list_messages(
             status_filter=status,
             search=search,
             hide_noise=hide_noise,
+            shift_id=shift_id,
         )
     return result
 

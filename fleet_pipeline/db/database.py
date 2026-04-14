@@ -741,6 +741,7 @@ def get_messages_page(
     status_filter: str = "all",
     search: str = "",
     hide_noise: bool = False,
+    shift_id: str = "",
 ) -> Dict[str, Any]:
     """
     Paginated message list. Returns one item per raw_message with all linked
@@ -749,6 +750,12 @@ def get_messages_page(
     offset = (page - 1) * limit
     where_clauses: list = []
     params: list = []
+
+    if shift_id:
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM events e WHERE e.msg_id = r.msg_id AND e.shift_id = ?)"
+        )
+        params.append(shift_id)
 
     if hide_noise:
         # Exclude messages whose only events are NOISE (messages with no events pass through)
@@ -789,8 +796,12 @@ def get_messages_page(
 
     # Fetch message rows for this page (one row per message)
     msg_rows = conn.execute(
-        f"""SELECT r.msg_id, r.timestamp_iso, r.sender_name, r.sender_id, r.raw_text
-            FROM raw_messages r {where_sql}
+        f"""SELECT r.msg_id, r.timestamp_iso, r.sender_name, r.sender_id, r.raw_text,
+                   r.quoted_wa_message_id,
+                   qr.raw_text as quoted_raw_text
+            FROM raw_messages r
+            LEFT JOIN raw_messages qr ON qr.msg_id = r.quoted_wa_message_id
+            {where_sql}
             ORDER BY r.timestamp_iso DESC
             LIMIT ? OFFSET ?""",
         params + [limit, offset],

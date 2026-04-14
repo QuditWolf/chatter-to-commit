@@ -185,6 +185,15 @@ tr:last-child td { border-bottom: none; }
 .pill.flagged    { background: #FAEEDA; color: #633806; }
 .pill.corrected  { background: #E6F1FB; color: #0C447C; }
 
+/* ── Gantt chart ─────────────────────────────────────────────────── */
+.gantt-wrap { min-width: 600px; }
+.gantt-truck-row { display: flex; align-items: center; margin-bottom: 6px; gap: 8px; }
+.gantt-truck-label { width: 56px; flex-shrink: 0; font-size: 11px; font-weight: 600; color: var(--color-text-primary); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gantt-bar-area { flex: 1; position: relative; height: 28px; }
+.gantt-axis { display: flex; padding-left: 64px; font-size: 10px; color: var(--color-text-secondary); margin-bottom: 2px; }
+.gantt-axis-tick { flex: 1; text-align: left; }
+.gantt-axis-tick:last-child { text-align: right; }
+
 /* ── Site analytics panel ────────────────────────────────────────── */
 .site-card {
   border: 0.5px solid var(--color-border-secondary);
@@ -480,6 +489,10 @@ tr:last-child td { border-bottom: none; }
       <div style="border-top:0.5px solid var(--color-border-secondary);padding-top:14px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
           <span style="font-size:12px;font-weight:600;color:var(--color-text-secondary);text-transform:uppercase;letter-spacing:.04em" id="shift-report-name">Report</span>
+          <select id="shift-view-selector" onchange="refreshShiftReport()"
+            style="padding:3px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:11px">
+            <option value="">Current shift</option>
+          </select>
           <span style="flex:1"></span>
           <button class="save-alias-btn" style="font-size:11px;padding:3px 10px" onclick="refreshShiftReport()">↺ Refresh</button>
           <button class="btn-primary" id="copy-summary-btn" style="font-size:11px;padding:3px 14px" onclick="copySummary()">Copy summary</button>
@@ -496,6 +509,17 @@ tr:last-child td { border-bottom: none; }
           style="width:100%;box-sizing:border-box;min-height:120px;font-family:var(--font-mono);font-size:11px;padding:9px 11px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-secondary);color:var(--color-text-primary);resize:vertical;line-height:1.75"
         ></textarea>
       </div>
+    </div>
+  </div>
+
+  <!-- Gantt chart -->
+  <div class="card" id="gantt-card">
+    <div class="card-title" style="display:flex;align-items:center;gap:8px">
+      <span>Loading gantt</span>
+      <span id="gantt-shift-label" style="font-size:11px;font-weight:400;color:var(--color-text-secondary)"></span>
+    </div>
+    <div id="gantt-body" style="overflow-x:auto">
+      <div class="loading-indicator">Loading…</div>
     </div>
   </div>
 
@@ -610,6 +634,9 @@ tr:last-child td { border-bottom: none; }
       <button class="filter-btn" onclick="setMsgFilter('held',this)">Held</button>
       <button class="filter-btn" onclick="setMsgFilter('corrected',this)">Corrected</button>
       <button class="filter-btn active" id="noise-toggle-btn" onclick="toggleHideNoise(this)" style="margin-left:4px">Show noise ✓</button>
+      <select id="msg-shift" onchange="loadMessages()" style="padding:4px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:11px;margin-left:4px">
+        <option value="">All shifts</option>
+      </select>
       <input type="text" id="msg-search" placeholder="Search trolley, site, message…" oninput="debounceMsgSearch(this.value)"/>
     </div>
 
@@ -657,6 +684,9 @@ tr:last-child td { border-bottom: none; }
         <option value="COMMITTED">Committed</option>
         <option value="FLAGGED">Flagged</option>
         <option value="HELD">Held</option>
+      </select>
+      <select id="cl-shift" onchange="loadCommits()" style="padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+        <option value="">All shifts</option>
       </select>
       <span id="cl-total" style="font-size:11px;color:var(--color-text-secondary);white-space:nowrap"></span>
     </div>
@@ -1060,7 +1090,7 @@ function handleWSEvent(type, data) {
   }
   if(type === 'hitl_created')   refreshHITL();
   if(type === 'hitl_resolved')  refreshHITL();
-  if(type === 'shift_changed')  refreshKPIs();
+  if(type === 'shift_changed')  { refreshKPIs(); populateShiftSelectors().then(() => refreshShiftReport()); }
 }
 
 function addPendingMessage(data) {
@@ -1216,8 +1246,10 @@ async function refreshSiteAnalytics() {
 async function refreshShiftReport() {
   const btn = document.querySelector('[onclick="refreshShiftReport()"]');
   if (btn) { btn.textContent = '↺ …'; btn.disabled = true; }
+  const selectedShift = document.getElementById('shift-view-selector')?.value || '';
   try {
-    const d = await API('/analytics/shift-summary');
+    const qs = selectedShift ? `?shift_id=${encodeURIComponent(selectedShift)}` : '';
+    const d = await API('/analytics/shift-summary' + qs);
 
     document.getElementById('shift-report-name').textContent = d.shift_name ? `Report — ${d.shift_name}` : 'Report';
 
@@ -1287,6 +1319,9 @@ async function refreshShiftReport() {
     // Copyable text
     document.getElementById('shift-summary-text').value = d.text || '';
 
+    // Gantt
+    refreshGantt(selectedShift || d.shift_id);
+
   } catch(e) {
     document.getElementById('shift-report-stats').innerHTML = `<div style="color:var(--color-status-held);font-size:12px">Error: ${e.message}</div>`;
   } finally {
@@ -1333,9 +1368,12 @@ async function refreshFleetTable() {
 async function refreshShiftHistory() {
   try {
     const d = await API('/api/shifts');
-    const pills = (d.shifts||[]).slice(0,5).map(sh =>
-      `<span class="total-pill">${sh.shift_name||('Shift '+sh.shift_number)}: ${sh.event_count} events</span>`
-    ).join('');
+    const pills = (d.shifts||[]).slice(0,5).map(sh => {
+      const start = sh.started_at ? formatIST(sh.started_at) : '–';
+      const end   = sh.ended_at   ? formatIST(sh.ended_at)   : 'active';
+      const name  = sh.shift_name || ('Shift '+sh.shift_number);
+      return `<span class="total-pill">${name} · ${start}–${end} · ${sh.event_count??''} events</span>`;
+    }).join('');
     document.getElementById('shift-history-pills').innerHTML = pills || '<span class="total-pill">No shifts yet</span>';
   } catch(e) {}
 }
@@ -1433,7 +1471,7 @@ async function loadMessages() {
   document.getElementById('msg-map-body').innerHTML = '<div class="loading-indicator">Loading…</div>';
   renderPending(); // Keep processing spinners visible while DB fetch is in flight
   try {
-    const params = new URLSearchParams({page: S.msgPage, limit: 20, status: S.msgFilter, search: S.msgSearch, hide_noise: S.msgHideNoise ? 'true' : 'false'});
+    const params = new URLSearchParams({page: S.msgPage, limit: 20, status: S.msgFilter, search: S.msgSearch, hide_noise: S.msgHideNoise ? 'true' : 'false', shift_id: document.getElementById('msg-shift')?.value || ''});
     const d = await API(`/api/messages?${params}`);
 
     S.msgTotalPages = d.pages || 1;
@@ -1539,9 +1577,12 @@ async function loadMessages() {
         ? `<div style="margin-top:6px"><button class="correct-btn" style="font-size:11px;padding:2px 10px" onclick="openAddCommit('${msgId}')">+ Add commit</button></div>`
         : '';
 
+      const quotedHtml = item.quoted_raw_text
+        ? `<div style="font-size:10px;font-family:var(--font-mono);color:var(--color-text-secondary);border-left:2px solid var(--color-border-secondary);padding-left:6px;margin-bottom:3px;opacity:0.8">↩ ${escHtml(item.quoted_raw_text)}</div>`
+        : '';
       return `<div class="msg-row" id="msg-row-${msgId||''}">
         <div>
-          <div class="raw-msg">${escHtml(item.raw_text||'')}</div>
+          ${quotedHtml}<div class="raw-msg">${escHtml(item.raw_text||'')}</div>
           <div class="msg-meta">${escHtml(item.sender_name||item.sender_id||'')} · ${fmtTime(item.timestamp_iso)}</div>
         </div>
         <div>${rightHtml}${addBtn}</div>
@@ -1848,6 +1889,7 @@ async function loadCommits() {
       site_id:       document.getElementById('cl-site').value,
       status:        document.getElementById('cl-status').value,
       commit_status: document.getElementById('cl-commit-status').value,
+      shift_id:      document.getElementById('cl-shift')?.value || '',
     });
     const d = await API(`/api/commits-log?${params}`);
     CL.totalPages = d.pages || 1;
@@ -1870,7 +1912,10 @@ async function loadCommits() {
       const srcColor = SOURCE_COLORS[ev.commit_source] || 'var(--color-text-secondary)';
       const infTag = ev.inferred ? `<span style="font-size:9px;padding:1px 4px;border-radius:8px;background:#F5F0FF;color:#5B1FA3;margin-left:4px">inferred</span>` : '';
       const reason = ev.reasoning ? `<div style="font-size:10px;color:var(--color-text-secondary);margin-top:2px">${escHtml(ev.reasoning)}</div>` : '';
-      const msg = ev.raw_text ? `<div style="font-size:11px;font-family:var(--font-mono)">${escHtml(ev.raw_text)}</div>${reason}` : reason || '–';
+      const quotedBlock = ev.quoted_raw_text
+        ? `<div style="font-size:10px;font-family:var(--font-mono);color:var(--color-text-secondary);border-left:2px solid var(--color-border-secondary);padding-left:6px;margin-bottom:2px;opacity:0.8">↩ ${escHtml(ev.quoted_raw_text)}</div>`
+        : '';
+      const msg = ev.raw_text ? `${quotedBlock}<div style="font-size:11px;font-family:var(--font-mono)">${escHtml(ev.raw_text)}</div>${reason}` : reason || '–';
       const eid = escAttr(ev.event_id);
       const actions = `<div style="display:flex;gap:4px">
         <button class="save-alias-btn" style="font-size:10px;padding:2px 7px" onclick="openEditCommit('${eid}')">Edit</button>
@@ -1904,19 +1949,21 @@ const CM = { mode: 'add', eventId: null, msgId: null };
 function _populateModalSelects() {
   const tSel = document.getElementById('cm-truck');
   const sSel = document.getElementById('cm-site');
-  if (tSel.options.length === 0) {
-    (S.trucks||[]).forEach(t => tSel.add(new Option(t.display_name||t.truck_id, t.truck_id)));
-  }
-  if (sSel.options.length === 0) {
-    (S.sites||[]).forEach(s => sSel.add(new Option(s.display_name||s.site_id, s.site_id)));
-  }
+  tSel.innerHTML = '<option value="">— Select trolley —</option>';
+  (S.trucks||[]).forEach(t => tSel.add(new Option(t.display_name||t.truck_id, t.truck_id)));
+  sSel.innerHTML = '<option value="">— Select site —</option>';
+  (S.sites||[]).forEach(s => sSel.add(new Option(s.display_name||s.site_id, s.site_id)));
 }
 
-function openAddCommit(msgId) {
+async function openAddCommit(msgId) {
   CM.mode = 'add'; CM.eventId = null; CM.msgId = msgId || null;
   document.getElementById('commit-modal-title').textContent =
     msgId ? 'Add commit to message' : 'Add commit';
   document.getElementById('cm-save-btn').textContent = 'Add';
+  // Ensure registries are loaded before populating selects
+  if (!S.trucks || !S.trucks.length || !S.sites || !S.sites.length) {
+    await loadRegistriesForMap();
+  }
   _populateModalSelects();
   document.getElementById('cm-ts').value = '';
   document.getElementById('cm-note').value = '';
@@ -1928,6 +1975,9 @@ async function openEditCommit(eventId) {
   CM.mode = 'edit'; CM.eventId = eventId;
   document.getElementById('commit-modal-title').textContent = 'Edit commit';
   document.getElementById('cm-save-btn').textContent = 'Save';
+  if (!S.trucks || !S.trucks.length || !S.sites || !S.sites.length) {
+    await loadRegistriesForMap();
+  }
   _populateModalSelects();
   document.getElementById('cm-error').style.display = 'none';
   document.getElementById('commit-modal').style.display = 'flex';
@@ -1964,6 +2014,18 @@ async function saveCommitModal() {
   const site_id  = document.getElementById('cm-site').value;
   const tsRaw    = document.getElementById('cm-ts').value;
   const note     = document.getElementById('cm-note').value.trim();
+
+  // Validate required fields
+  if (!truck_id) {
+    errEl.textContent = 'Select a trolley.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!site_id) {
+    errEl.textContent = 'Select a site.';
+    errEl.style.display = 'block';
+    return;
+  }
 
   // Convert datetime-local to ISO
   const ts = tsRaw ? new Date(tsRaw).toISOString() : null;
@@ -2038,9 +2100,9 @@ function switchTab(id, el) {
   document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
   document.getElementById('tab-'+id).classList.add('active');
   el.classList.add('active');
-  if(id === 'operator')  { loadMessages(); refreshHITL(); }
-  if(id === 'dashboard') { refreshKPIs(); refreshSiteAnalytics(); refreshShiftReport(); }
-  if(id === 'commits')   { populateCommitFilters(); loadCommits(); }
+  if(id === 'operator')  { populateShiftSelectors(); loadMessages(); refreshHITL(); }
+  if(id === 'dashboard') { refreshKPIs(); refreshSiteAnalytics(); populateShiftSelectors().then(() => refreshShiftReport()); }
+  if(id === 'commits')   { populateCommitFilters(); populateShiftSelectors(); loadCommits(); }
   if(id === 'admin')     { loadTruckRegistry(); loadSiteRegistry(); loadShiftConfig(); loadMergeTrucks(); }
 }
 
@@ -2377,12 +2439,214 @@ async function refreshStatus() {
   }
 }
 
+// ── Shift selectors (dashboard + commits) ─────────────────────────────────
+async function populateShiftSelectors() {
+  try {
+    const d = await API('/analytics/shifts');
+    const shifts = d.shifts || [];
+
+    // Dashboard shift selector
+    const dashSel = document.getElementById('shift-view-selector');
+    if (dashSel) {
+      dashSel.innerHTML = '<option value="">Current shift</option>';
+      shifts.forEach(sh => {
+        const start = sh.started_at ? formatIST(sh.started_at) : '–';
+        const end   = sh.ended_at   ? formatIST(sh.ended_at)   : 'active';
+        const label = `${sh.shift_name} · ${start}–${end}`;
+        dashSel.add(new Option(label, sh.shift_id));
+      });
+    }
+
+    // Commits shift filter
+    const clSel = document.getElementById('cl-shift');
+    if (clSel) {
+      clSel.innerHTML = '<option value="">All shifts</option>';
+      shifts.forEach(sh => {
+        const start = sh.started_at ? formatIST(sh.started_at) : '–';
+        const label = `${sh.shift_name} (${start})`;
+        clSel.add(new Option(label, sh.shift_id));
+      });
+    }
+
+    // Operator messages shift filter
+    const msgSel = document.getElementById('msg-shift');
+    if (msgSel) {
+      const cur = msgSel.value;
+      msgSel.innerHTML = '<option value="">All shifts</option>';
+      shifts.forEach(sh => {
+        const start = sh.started_at ? formatIST(sh.started_at) : '–';
+        const label = `${sh.shift_name} (${start})`;
+        msgSel.add(new Option(label, sh.shift_id));
+      });
+      msgSel.value = cur; // restore selection if possible
+    }
+  } catch(e) {}
+}
+
+// ── Gantt chart ────────────────────────────────────────────────────────────
+async function refreshGantt(shiftId) {
+  const body = document.getElementById('gantt-body');
+  const label = document.getElementById('gantt-shift-label');
+  if (!body) return;
+  body.innerHTML = '<div class="loading-indicator">Loading…</div>';
+  try {
+    const qs = shiftId ? `?shift_id=${encodeURIComponent(shiftId)}` : '';
+    const d = await API('/analytics/gantt' + qs);
+    if (label) label.textContent = d.shift_name || '';
+    if (!d.trucks || !d.trucks.length) {
+      body.innerHTML = '<div class="empty-state">No loading events in this shift yet</div>';
+      return;
+    }
+
+    // Time axis bounds
+    const shiftStart = d.shift_start ? new Date(d.shift_start).getTime() : null;
+    const shiftEnd   = d.shift_end   ? new Date(d.shift_end).getTime()   : Date.now();
+
+    // Find actual data time range
+    let minT = shiftStart || Infinity, maxT = shiftEnd || -Infinity;
+    for (const truck of d.trucks) {
+      for (const cyc of truck.cycles) {
+        for (const key of ['enter','ls','lo','left']) {
+          const ev = cyc[key];
+          if (ev && ev.timestamp_effective) {
+            const t = new Date(ev.timestamp_effective).getTime();
+            if (t < minT) minT = t;
+            if (t > maxT) maxT = t;
+          }
+        }
+      }
+    }
+    if (minT === Infinity) minT = Date.now() - 3600000;
+    if (maxT === -Infinity || maxT <= minT) maxT = minT + 3600000;
+    // Pad 5% each side
+    const span = maxT - minT;
+    const axisMin = minT - span * 0.03;
+    const axisMax = maxT + span * 0.05;
+    const axisSpan = axisMax - axisMin;
+
+    const pct = t => Math.max(0, Math.min(100, ((t - axisMin) / axisSpan) * 100));
+
+    // Build axis ticks (4–5 ticks)
+    const tickCount = 5;
+    const tickInterval = axisSpan / (tickCount - 1);
+    const ticks = [];
+    for (let i = 0; i < tickCount; i++) {
+      const ts = axisMin + i * tickInterval;
+      const dt = new Date(ts);
+      const hh = String(dt.getHours()).padStart(2,'0');
+      const mm = String(dt.getMinutes()).padStart(2,'0');
+      ticks.push(`${hh}:${mm}`);
+    }
+
+    const now = Date.now();
+
+    let html = `<div class="gantt-wrap">`;
+    // Axis
+    html += `<div class="gantt-axis">${ticks.map((t,i) => `<span class="gantt-axis-tick" style="${i===tickCount-1?'flex:0;min-width:36px':''}">${t}</span>`).join('')}</div>`;
+
+    for (const truck of d.trucks) {
+      html += `<div class="gantt-truck-row">`;
+      html += `<div class="gantt-truck-label" title="${escHtml(truck.truck_name)}">${escHtml(truck.truck_name)}</div>`;
+      html += `<div class="gantt-bar-area">`;
+      html += `<svg width="100%" height="28" style="overflow:visible">`;
+
+      for (const cyc of truck.cycles) {
+        const enterEv  = cyc.enter  && !cyc.enter.inferred  ? cyc.enter  : null;
+        const lsEv     = cyc.ls     && !cyc.ls.inferred     ? cyc.ls     : null;
+        const loEv     = cyc.lo     && !cyc.lo.inferred     ? cyc.lo     : null;
+        const leftEv   = cyc.left   && !cyc.left.inferred   ? cyc.left   : null;
+
+        // Use boundary times (may include inferred for geometry, but don't show inferred markers)
+        const enterT = cyc.enter  ? new Date(cyc.enter.timestamp_effective).getTime()  : null;
+        const lsT    = cyc.ls     ? new Date(cyc.ls.timestamp_effective).getTime()     : null;
+        const loT    = cyc.lo     ? new Date(cyc.lo.timestamp_effective).getTime()     : null;
+        const leftT  = cyc.left   ? new Date(cyc.left.timestamp_effective).getTime()   : null;
+
+        // Determine bar color
+        let barColor = '#6B9FD4'; // blue = completed LS→LO
+        if (lsT && !loT) {
+          const loadingMs = now - lsT;
+          barColor = loadingMs > 3600000 ? '#D4A017' : '#3B6D11'; // yellow if >1hr, green if ongoing
+        } else if (loT && !lsT) {
+          barColor = '#A32D2D'; // red: LO without LS
+        }
+
+        const mid = 14; // vertical center of SVG
+        const dotR = 4;
+
+        // Thin transit line: ENTER → LS (or start of loading block if no enter)
+        if (enterT && lsT) {
+          const x1 = pct(enterT);
+          const x2 = pct(lsT);
+          html += `<line x1="${x1}%" y1="${mid}" x2="${x2}%" y2="${mid}" stroke="#c0bdb5" stroke-width="1.5"/>`;
+        }
+
+        // LS→LO solid bar
+        const blockStart = lsT || (loT ? loT - 600000 : null);
+        const blockEnd   = loT || (lsT ? Math.min(lsT + (loT ? loT-lsT : 3600000), now) : null);
+        if (blockStart && blockEnd) {
+          const x1 = pct(blockStart);
+          const x2 = pct(blockEnd);
+          const w  = Math.max(x2 - x1, 0.3);
+          html += `<rect x="${x1}%" y="${mid-7}" width="${w}%" height="14" rx="3" fill="${barColor}" opacity="0.85"/>`;
+          // Label: truck cycle number if multiple + avg time
+          if (truck.cycles.length > 1 || truck.avg_min) {
+            const label = truck.cycles.length > 1
+              ? `${truck.truck_name}${cyc.cycle_number}`
+              : truck.truck_name;
+            const avgStr = truck.avg_min ? ` ${truck.avg_min}m` : '';
+            html += `<text x="${x1+w/2}%" y="${mid+4}" text-anchor="middle" font-size="9" fill="white" font-weight="600">${escHtml(label)}${escHtml(avgStr)}</text>`;
+          }
+        }
+
+        // Thin line: LO → LEFT
+        if (loT && leftT) {
+          const x1 = pct(loT);
+          const x2 = pct(leftT);
+          html += `<line x1="${x1}%" y1="${mid}" x2="${x2}%" y2="${mid}" stroke="#c0bdb5" stroke-width="1.5"/>`;
+        }
+
+        // Dot markers (only for non-inferred events)
+        if (enterEv) {
+          html += `<circle cx="${pct(enterT)}%" cy="${mid}" r="${dotR}" fill="white" stroke="#888780" stroke-width="1.5"/>`;
+        }
+        if (lsEv) {
+          html += `<circle cx="${pct(lsT)}%" cy="${mid}" r="${dotR}" fill="${barColor}" stroke="white" stroke-width="1.5"/>`;
+        }
+        if (loEv) {
+          html += `<circle cx="${pct(loT)}%" cy="${mid}" r="${dotR}" fill="${barColor}" stroke="white" stroke-width="1.5"/>`;
+        }
+        if (leftEv) {
+          html += `<circle cx="${pct(leftT)}%" cy="${mid}" r="${dotR}" fill="white" stroke="#888780" stroke-width="1.5"/>`;
+        }
+      }
+
+      html += `</svg>`;
+      html += `</div></div>`;
+    }
+
+    // Legend
+    html += `<div style="display:flex;gap:12px;margin-top:10px;flex-wrap:wrap;font-size:10px;color:var(--color-text-secondary)">
+      <span><svg width="10" height="10"><circle cx="5" cy="5" r="4" fill="#3B6D11"/></svg> In loading</span>
+      <span><svg width="10" height="10"><circle cx="5" cy="5" r="4" fill="#6B9FD4"/></svg> Loaded (LS→LO)</span>
+      <span><svg width="10" height="10"><circle cx="5" cy="5" r="4" fill="#D4A017"/></svg> Loading &gt;1hr</span>
+      <span><svg width="10" height="10"><circle cx="5" cy="5" r="4" fill="#A32D2D"/></svg> LO without LS</span>
+      <span><svg width="12" height="10"><line x1="0" y1="5" x2="12" y2="5" stroke="#c0bdb5" stroke-width="2"/></svg> Transit (ENTER↔LEFT)</span>
+    </div>`;
+
+    html += `</div>`;
+    body.innerHTML = html;
+  } catch(e) {
+    body.innerHTML = `<div class="empty-state">Gantt error: ${e.message}</div>`;
+  }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────
 function startApp() {
   connectWS();
   refreshKPIs();
   refreshSiteAnalytics();
-  refreshShiftReport();
+  populateShiftSelectors().then(() => refreshShiftReport());
   refreshHITL();
   refreshShiftHistory();
   loadInjectStatus();

@@ -772,8 +772,30 @@ class Committer:
                         ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
 
                 # 3. Shift default site (announced at shift start)
+                # Filter default sites by operation type:
+                #   ENTER/LS/LO/LEFT → loading sites only
+                #   US/UO            → unloading sites only
                 if ev.get("site_id") is None and ev_shift_id:
                     default_sites = db.get_shift_default_sites(conn, ev_shift_id)
+                    if default_sites:
+                        _loading_ops = {"ENTER", "LS", "LO", "LEFT"}
+                        _unloading_ops = {"US", "UO"}
+                        _ev_status = ev.get("status", "")
+                        if _ev_status in _loading_ops or _ev_status in _unloading_ops:
+                            _target_type = "loading" if _ev_status in _loading_ops else "unloading"
+                            _typed = []
+                            for _ds in default_sites:
+                                _sr = conn.execute(
+                                    "SELECT site_type FROM sites WHERE site_id=?", (_ds,)
+                                ).fetchone()
+                                if _sr and _sr["site_type"] == _target_type:
+                                    _typed.append(_ds)
+                            if _typed:
+                                default_sites = _typed
+                            # If no typed matches, leave default_sites as-is (fall to HITL)
+                            else:
+                                default_sites = []
+
                     if len(default_sites) == 1:
                         ev["site_id"] = default_sites[0]
                         ev["site_alias"] = ev.get("site_alias") or default_sites[0]
@@ -782,10 +804,60 @@ class Committer:
                         note = f"site from shift default ({default_sites[0]})"
                         ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
                     elif len(default_sites) > 1:
-                        # Multiple default sites — need operator to clarify
+                        # Multiple default sites of same type — need operator to clarify
                         # Leave site_id=None so UNKNOWN_SITE HITL fires below
                         note = f"multiple default sites {default_sites} — operator must clarify"
                         ev["reasoning"] = f"{ev.get('reasoning') or ''}; {note}".lstrip("; ")
+
+            # 4. Reply context fallback: if LLM didn't extract truck/site, use from reply chain
+            if reply_context and ev.get("truck_id") is None:
+                reply_trucks = reply_context.get("reply_to_trucks") or []
+                if len(reply_trucks) == 1:
+                    _rt = reply_trucks[0]
+                    # Resolve truck alias → truck_id
+                    _tr_row = conn.execute(
+                        "SELECT truck_id FROM trucks WHERE truck_id=? AND is_active=1", (_rt,)
+                    ).fetchone()
+                    if not _tr_row:
+                        for _tr in conn.execute("SELECT truck_id, aliases FROM trucks WHERE is_active=1"):
+                            try:
+                                _als = json.loads(_tr["aliases"] or "[]")
+                                if _rt in _als or _rt.lower() in [a.lower() for a in _als]:
+                                    _tr_row = _tr
+                                    break
+                            except Exception:
+                                pass
+                    if _tr_row:
+                        ev["truck_id"] = _tr_row["truck_id"]
+                        ev["truck_alias"] = _rt
+                        ev["inferred"] = True
+                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.75)
+                        reply_text = reply_context.get("reply_to_raw_text", "")
+                        ev["reasoning"] = f"truck from reply chain ({reply_text[:40]}); {ev.get('reasoning') or ''}".strip("; ")
+
+            if reply_context and ev.get("site_id") is None:
+                reply_sites = reply_context.get("reply_to_sites") or []
+                if len(reply_sites) == 1:
+                    _rs = reply_sites[0]
+                    _si_row = conn.execute(
+                        "SELECT site_id FROM sites WHERE site_id=? AND is_active=1", (_rs,)
+                    ).fetchone()
+                    if not _si_row:
+                        for _si in conn.execute("SELECT site_id, aliases FROM sites WHERE is_active=1"):
+                            try:
+                                _als = json.loads(_si["aliases"] or "[]")
+                                if _rs in _als or _rs.lower() in [a.lower() for a in _als]:
+                                    _si_row = _si
+                                    break
+                            except Exception:
+                                pass
+                    if _si_row:
+                        ev["site_id"] = _si_row["site_id"]
+                        ev["site_alias"] = _rs
+                        ev["inferred"] = True
+                        ev["confidence"] = min(ev.get("confidence", overall_confidence), 0.75)
+                        reply_text = reply_context.get("reply_to_raw_text", "")
+                        ev["reasoning"] = f"site from reply chain ({reply_text[:40]}); {ev.get('reasoning') or ''}".strip("; ")
 
             truck_id = ev.get("truck_id")
             site_id = ev.get("site_id")
@@ -796,15 +868,14 @@ class Committer:
 
             # Reply context: cap confidence at 0.82 so reply-based events get
             # committed but flagged for review (amber highlight in UI).
-            if reply_context and not ev.get("_orig_truck_id"):
-                # Only cap if the LLM actually used the reply context
-                # (i.e. no unresolved truck/site from LLM)
+            if reply_context:
                 ev_confidence = min(ev_confidence, 0.82)
                 if not ev.get("inferred"):
                     ev["inferred"] = True
-                    reply_text = reply_context.get("reply_to_raw_text", "")
+                reply_text = reply_context.get("reply_to_raw_text", "")
+                if reply_text and "reply to:" not in (ev.get("reasoning") or ""):
                     ev["reasoning"] = (
-                        f"reply to: {reply_text}; {ev.get('reasoning') or ''}"
+                        f"reply to: \"{reply_text[:60]}\"; {ev.get('reasoning') or ''}"
                     ).strip("; ")
 
             # Determine final commit status for this event
