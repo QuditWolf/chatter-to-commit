@@ -78,6 +78,8 @@ def run_migrations(db_path: str = DB_PATH) -> None:
 
         # Migrate existing shifts → shift_events
         print("\n[MIGRATION] Creating shift_events for existing shifts...")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
         existing = conn.execute(
             "SELECT shift_id, started_at, ended_at, default_site_id, default_site_ids FROM shifts"
         ).fetchall()
