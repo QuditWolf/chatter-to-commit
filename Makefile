@@ -14,7 +14,7 @@ build:
 
 # Follow all logs (docker container stdout/stderr)
 logs:
-	docker compose logs -f
+	docker compose logs -f --timestamps
 
 # Live tail of all log files combined (api.log + wa.log), prefixed with filename
 logs-tail:
