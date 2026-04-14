@@ -2061,11 +2061,13 @@ function createModal(id) {
 }
 
 async function doMergeShifts() {
-  const srcId = document.getElementById('merge-src').value;
-  const dstId = document.getElementById('merge-dst').value;
+  const srcSel = document.getElementById('merge-src');
+  const dstSel = document.getElementById('merge-dst');
+  const srcId = srcSel?.value || '';
+  const dstId = dstSel?.value || '';
   const errEl = document.getElementById('merge-error');
   errEl.style.display = 'none';
-  if (!srcId || !dstId) {
+  if (!srcId || !dstId || srcId === '' || dstId === '') {
     errEl.textContent = 'Select both shifts.';
     errEl.style.display = 'block';
     return;

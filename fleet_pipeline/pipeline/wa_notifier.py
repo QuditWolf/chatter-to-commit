@@ -253,11 +253,22 @@ def send_summary_to_group(group_jid: str, db_path: str) -> None:
                    ORDER BY started_at DESC LIMIT 1"""
             ).fetchone()
 
+            is_last = False
             if not shift:
-                text = "No active shift."
+                # No active shift - get the last shift
+                shift = conn.execute(
+                    """SELECT shift_id, shift_number, shift_name, ended_at
+                       FROM shifts ORDER BY started_at DESC LIMIT 1"""
+                ).fetchone()
+                is_last = True
+
+            if not shift:
+                text = "No shift found."
             else:
                 shift_id = shift["shift_id"]
                 shift_name = shift["shift_name"]
+                if is_last:
+                    shift_name = f"(last) {shift_name}"
 
                 # Loaded per site
                 loaded_by_site = conn.execute(

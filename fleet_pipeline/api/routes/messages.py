@@ -774,8 +774,37 @@ def delete_shift(shift_id: str):
 
 @router.post("/api/shifts/merge")
 def merge_shifts(src_shift_id: str, dst_shift_id: str):
-    """Merge src shift into dst shift (events + shift_events reassigned)."""
+    """Merge src shift into dst shift. Result: dst has earliest start, latest end, all events."""
     with db.db_conn(DB_PATH) as conn:
+        src = conn.execute(
+            "SELECT * FROM shifts WHERE shift_id=?", (src_shift_id,)
+        ).fetchone()
+        dst = conn.execute(
+            "SELECT * FROM shifts WHERE shift_id=?", (dst_shift_id,)
+        ).fetchone()
+        if not src or not dst:
+            raise HTTPException(400, "Shift not found")
+
+        # Determine merge order: find which started earlier
+        if src["started_at"] <= dst["started_at"]:
+            earlier = dict(src)
+            later = dict(dst)
+        else:
+            earlier = dict(dst)
+            later = dict(src)
+
+        # Update dst shift with new boundaries
+        conn.execute(
+            """UPDATE shifts SET started_at=?, ended_at=?
+               WHERE shift_id=?""",
+            (
+                earlier["started_at"],
+                later["ended_at"] if later["ended_at"] else None,
+                dst_shift_id,
+            ),
+        )
+
+        # Move all events and shift_events
         conn.execute(
             "UPDATE events SET shift_id=? WHERE shift_id=?",
             (dst_shift_id, src_shift_id),
@@ -784,16 +813,20 @@ def merge_shifts(src_shift_id: str, dst_shift_id: str):
             "UPDATE shift_events SET shift_id=? WHERE shift_id=?",
             (dst_shift_id, src_shift_id),
         )
-        conn.execute(
-            "UPDATE shifts SET default_site_id=? WHERE shift_id=? AND default_site_id IS NULL",
-            (
-                conn.execute(
-                    "SELECT default_site_id FROM shifts WHERE shift_id=?",
-                    (dst_shift_id,),
-                ).fetchone()[0],
-                dst_shift_id,
-            ),
-        )
+
+        # Update shift_event times to match new boundaries
+        if earlier["started_at"]:
+            conn.execute(
+                "UPDATE shift_events SET timestamp_iso=? WHERE shift_id=? AND status='SHIFT_START'",
+                (earlier["started_at"], dst_shift_id),
+            )
+        if later["ended_at"]:
+            conn.execute(
+                "UPDATE shift_events SET timestamp_iso=? WHERE shift_id=? AND status='SHIFT_END'",
+                (later["ended_at"], dst_shift_id),
+            )
+
+        # Delete src shift
         conn.execute("DELETE FROM shifts WHERE shift_id=?", (src_shift_id,))
 
     return {"merged": True, "src": src_shift_id, "dst": dst_shift_id}

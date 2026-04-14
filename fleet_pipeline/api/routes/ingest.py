@@ -10,15 +10,73 @@ POST /api/ingest/reprocess-event/{id}  — re-run a single HELD event by event_i
 
 import asyncio
 import logging
+import re
 from typing import Optional
 
 import pytz
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
-from fleet_pipeline.utils import now_ist, now_ist_iso
+from fleet_pipeline.utils import now_ist, now_ist_iso, to_ist
 
 log = logging.getLogger(__name__)
+
+# Configured shift start patterns (from shift_config table)
+_CONFIGURED_SHIFT_PATTERNS = [
+    re.compile(r"\bshift\s+(start|started|begin|begins|shuru)\b", re.I),
+    re.compile(r"\bs([123])\b", re.I),
+    re.compile(r"\bshift\s+([123])\b", re.I),
+    re.compile(r"\btracking\s+volunteers?\b", re.I),
+    re.compile(r"\bvolunteers?\b.*breach\b", re.I),
+]
+
+
+def _is_configured_shift_pattern(text: str) -> bool:
+    """Return True if text matches configured shift start patterns."""
+    t = (text or "").strip()
+    return any(p.search(t) for p in _CONFIGURED_SHIFT_PATTERNS)
+
+
+def _notify_shift_clarification(
+    group_jid: str, text: str, ctrl_jid: str, db_path: str
+) -> None:
+    """Send HITL question to control group asking for shift start clarification."""
+    from fleet_pipeline.pipeline.wa_notifier import _resolve_group_jid
+    from fleet_pipeline.pipeline.hitl_queue import create_hitl_question
+
+    target_jid = _resolve_group_jid(ctrl_jid) or group_jid
+    question_text = (
+        f'❓ Unclear shift start — "{text}"\n\n'
+        f"Please reply with:\n"
+        f"• Site code to start at (e.g. `SOC`)\n"
+        f"• `no shift` to cancel"
+    )
+    try:
+        import sqlite3
+
+        with sqlite3.connect(db_path) as conn:
+            qid = create_hitl_question(
+                conn,
+                msg_id=f"shift_clarify_{now_ist_iso()}",
+                question_type="SHIFT_START Clarification",
+                question_text=question_text,
+                context={"raw_text": text},
+            )
+            # Send WA message
+            import urllib.request
+
+            payload = {"group_jid": target_jid, "text": question_text}.encode()
+            req = urllib.request.Request(
+                f"{__import__('os').environ.get('WA_LISTENER_URL', 'http://wa:3001')}/send-message",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                pass  # Fire and forget
+    except Exception as e:
+        log.warning("Failed to send shift clarification: %s", e)
+
 
 router = APIRouter(prefix="/api/ingest", tags=["ingest"])
 
@@ -485,13 +543,31 @@ async def _handle_control_message(
     # ── Shift signal (start/end) — only from plain messages, not replies ──────
     # Replies (quoted messages) are HITL answers; they must not accidentally
     # end the shift via phrases like "Loading Over" or "ALL trucks LEFT".
+    # Also skip if it's an unknown pattern - ask HITL instead.
     signal = detect_shift_signal(text) if not is_reply else None
     if is_reply and detect_shift_signal(text):
         log.info(
             "[CTRL] Shift signal %r suppressed — message is a reply (HITL answer)",
             detect_shift_signal(text),
         )
-    if signal in ("start", "end"):
+    # Check if shift start is from non-configured pattern without valid truck status
+    if signal == "start" and not is_reply:
+        # Valid truck status: truck letter followed by status keyword
+        _truck_status_re = re.compile(r"^[A-Z]\s+(LS|LO|US|UO|ENTER)\b", re.I)
+        has_truck_status = bool(_truck_status_re.search(text.strip()))
+        # If neither configured pattern nor valid truck status, skip shift start
+        if not _is_configured_shift_pattern(text) and not has_truck_status:
+            log.info(
+                "[CTRL] Shift start skipped — not a configured pattern or valid truck update"
+            )
+            try:
+                _notify_shift_clarification(group_jid, text, ctrl_jid, DB_PATH)
+            except Exception as _exc:
+                log.warning("[CTRL] HITL clarification failed: %s", _exc)
+            await ws_manager.broadcast(
+                "shift_changed", {"reason": "clarification_needed"}
+            )
+            return
         log.info("[CTRL] Shift %s signal detected — processing", signal)
         try:
             conn = sqlite3.connect(DB_PATH)
