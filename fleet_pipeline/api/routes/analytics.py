@@ -835,9 +835,11 @@ def list_shifts():
         rows = conn.execute(
             """SELECT s.shift_id, s.shift_number, s.shift_name, s.started_at, s.ended_at,
                       s.default_site_id, s.default_site_ids,
-                      (SELECT COUNT(*) FROM events e WHERE e.shift_id=s.shift_id 
+                      (SELECT COUNT(*) FROM events e WHERE e.shift_id=s.shift_id
                        AND e.commit_status IN ('COMMITTED','FLAGGED')) as event_count
-               FROM shifts s ORDER BY s.started_at DESC"""
+               FROM shifts s
+               WHERE (s.is_deleted IS NULL OR s.is_deleted = 0)
+               ORDER BY s.started_at DESC"""
         ).fetchall()
         # Pre-fetch site display names for all referenced site_ids
         all_site_ids = set()

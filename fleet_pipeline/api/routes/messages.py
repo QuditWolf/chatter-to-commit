@@ -734,42 +734,45 @@ def list_shift_events(
 
 
 @router.post("/api/shifts/{shift_id}/delete")
-def delete_shift(shift_id: str):
-    """Delete a shift if it has 0 events. Merges with previous shift."""
-    with db.db_conn(DB_PATH) as conn:
-        ev_count = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE shift_id=?",
-            (shift_id,),
-        ).fetchone()[0]
-        if ev_count > 0:
-            raise HTTPException(400, f"Shift has {ev_count} events, cannot delete")
+def delete_shift(shift_id: str, mode: str = "orphan"):
+    """Soft-delete a shift.
 
+    mode=orphan  (default): keep events but detach them from this shift
+                            (events.shift_id → NULL, shift marked is_deleted=1)
+    mode=cascade           : soft-delete all events too
+                            (events.commit_status → DELETED, shift marked is_deleted=1)
+    """
+    if mode not in ("orphan", "cascade"):
+        raise HTTPException(400, "mode must be 'orphan' or 'cascade'")
+
+    with db.db_conn(DB_PATH) as conn:
         shift = conn.execute(
             "SELECT * FROM shifts WHERE shift_id=?", (shift_id,)
         ).fetchone()
         if not shift:
             raise HTTPException(404, "Shift not found")
 
-        prev = conn.execute(
-            """SELECT * FROM shifts 
-               WHERE started_at < ? 
-               ORDER BY started_at DESC LIMIT 1""",
-            (shift["started_at"],),
-        ).fetchone()
-        if prev:
+        if mode == "orphan":
+            # Detach events — they become shift-less but are preserved
             conn.execute(
-                "UPDATE events SET shift_id=? WHERE shift_id=?",
-                (prev["shift_id"], shift_id),
+                "UPDATE events SET shift_id=NULL WHERE shift_id=?", (shift_id,)
             )
+        else:
+            # Soft-delete all events in this shift
             conn.execute(
-                "UPDATE shift_events SET shift_id=? WHERE shift_id=?",
-                (prev["shift_id"], shift_id),
+                "UPDATE events SET commit_status='DELETED' WHERE shift_id=?", (shift_id,)
             )
 
-        conn.execute("DELETE FROM shifts WHERE shift_id=?", (shift_id,))
-        conn.execute("DELETE FROM shift_events WHERE shift_id=?", (shift_id,))
+        # Soft-delete the shift_events rows
+        conn.execute(
+            "UPDATE shift_events SET commit_status='DELETED' WHERE shift_id=?", (shift_id,)
+        )
+        # Soft-delete the shift itself
+        conn.execute(
+            "UPDATE shifts SET is_deleted=1 WHERE shift_id=?", (shift_id,)
+        )
 
-    return {"deleted": True, "merged_into": prev["shift_id"] if prev else None}
+    return {"deleted": True, "mode": mode}
 
 
 @router.post("/api/shifts/merge")

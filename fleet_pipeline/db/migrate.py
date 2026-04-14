@@ -125,6 +125,9 @@ def run_migrations(db_path: str = DB_PATH) -> None:
         else:
             print("  = No migration needed (shift_events already exist)")
 
+        print("\n[shifts] Adding new columns...")
+        _add_column(conn, "shifts", "is_deleted", "BOOLEAN DEFAULT FALSE")
+
         print("\n[hitl_queue] Adding new columns...")
         _add_column(conn, "hitl_queue", "wa_message_id", "TEXT")
 

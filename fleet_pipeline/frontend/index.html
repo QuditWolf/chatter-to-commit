@@ -727,14 +727,11 @@ tr:last-child td { border-bottom: none; }
     <div style="margin-top:20px;padding-top:16px;border-top:0.5px solid var(--color-border-secondary)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
         <h3 style="margin:0;font-size:13px;font-weight:600">Shifts</h3>
-        <div style="display:flex;gap:6px">
-          <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="loadShiftEvents()">Refresh</button>
-          <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="openMergeShifts()">Merge</button>
-        </div>
+        <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="loadShiftEvents()">Refresh</button>
       </div>
       <table id="shift-table" style="width:100%;table-layout:fixed;font-size:11px">
         <thead><tr>
-          <th style="width:140px">Shift</th><th style="width:120px">Started</th><th style="width:100px">Ended</th><th style="width:60px">Events</th><th>Default Sites</th><th style="width:50px"></th>
+          <th style="width:140px">Shift</th><th style="width:120px">Started</th><th style="width:100px">Ended</th><th style="width:50px">Ev</th><th>Default Sites</th><th style="width:140px"></th>
         </tr></thead>
         <tbody id="shift-body"><tr><td colspan="6" class="loading-indicator">Loading…</td></tr></tbody>
       </table>
@@ -1986,17 +1983,16 @@ async function loadShiftEvents() {
       const startTime = s.started_at ? formatIST(s.started_at) : '–';
       const endTime = s.ended_at ? formatIST(s.ended_at) : 'active';
       const sites = s.default_sites?.length ? s.default_sites.join(', ') : '–';
-      // Only offer merge if there's an older shift below (i > 0 since table renders newest-first)
+      // Table renders newest-first (i = n-1 at top, i = 0 at bottom).
+      // "Merge↓" merges this shift into the one below (older, index i-1).
       const canMerge = i > 0;
       const actions = [];
       if (canMerge) {
         actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px" onclick="mergeShiftInto('${s.shift_id}')" title="Merge into shift below">Merge↓</button>`);
       }
-      if (canDelete) {
-        actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:var(--color-status-held)" onclick="deleteShift('${s.shift_id}')" title="Delete shift (0 events)">Del</button>`);
-      } else {
-        actions.push(`<span style="font-size:10px;color:var(--color-text-secondary)">${evCount} ev</span>`);
-      }
+      // Always offer two delete options
+      actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:#92400e" onclick="deleteShift('${s.shift_id}','orphan')" title="Delete shift, keep events (detach from shift)">Del</button>`);
+      actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:var(--color-status-held)" onclick="deleteShift('${s.shift_id}','cascade')" title="Delete shift and all its events">Del+</button>`);
       const row = document.createElement('tr');
       row.innerHTML = `<td style="font-weight:500">${escHtml(s.shift_name)}</td>
         <td>${startTime}</td>
@@ -2015,12 +2011,15 @@ async function loadShiftEvents() {
   }
 }
 
-async function deleteShift(shiftId) {
-  if (!confirm('Delete this shift? It must have 0 events.')) return;
+async function deleteShift(shiftId, mode) {
+  const msg = mode === 'cascade'
+    ? 'Delete shift AND all its events? (events will be soft-deleted)'
+    : 'Delete shift only? Events will be kept but detached from this shift.';
+  if (!confirm(msg)) return;
   try {
-    await API(`/api/shifts/${shiftId}/delete`, { method: 'POST' });
+    await API(`/api/shifts/${shiftId}/delete?mode=${mode}`, { method: 'POST' });
     loadShiftEvents();
-    loadShiftsForSelects();
+    populateShiftSelectors();
   } catch(e) {
     alert(e.message);
   }
@@ -2360,7 +2359,7 @@ function switchTab(id, el) {
   el.classList.add('active');
   if(id === 'operator')  { populateShiftSelectors().then(() => loadMessages()); refreshHITL(); }
   if(id === 'dashboard') { refreshKPIs(); refreshSiteAnalytics(); populateShiftSelectors().then(() => refreshShiftReport()); }
-  if(id === 'commits')   { populateCommitFilters(); populateShiftSelectors(); loadCommits(); }
+  if(id === 'commits')   { populateCommitFilters(); populateShiftSelectors(); loadCommits(); loadShiftEvents(); }
   if(id === 'admin')     { loadTruckRegistry(); loadSiteRegistry(); loadShiftConfig(); loadMergeTrucks(); }
 }
 

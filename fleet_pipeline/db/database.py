@@ -689,7 +689,9 @@ def merge_trucks(conn: sqlite3.Connection, src_id: str, dst_id: str) -> dict:
 
 
 def get_all_shifts(conn: sqlite3.Connection) -> List[Dict]:
-    rows = conn.execute("SELECT * FROM shifts ORDER BY started_at DESC").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM shifts WHERE (is_deleted IS NULL OR is_deleted = 0) ORDER BY started_at DESC"
+    ).fetchall()
     return [dict(r) for r in rows]
 
 

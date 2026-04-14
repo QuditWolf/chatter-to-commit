@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS shifts (
     default_site_id  TEXT,                       -- site announced with shift start (via control group)
     default_site_ids TEXT,                       -- JSON array of site IDs
     notes            TEXT,
+    is_deleted       BOOLEAN DEFAULT FALSE,           -- soft-delete flag
     simulation_run_id TEXT REFERENCES simulation_runs(run_id),
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
