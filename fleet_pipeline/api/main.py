@@ -96,19 +96,19 @@ async def lifespan(application: FastAPI):
                     gap = (now_ist() - sd._last_ts).total_seconds()
                     if gap >= AUTO_END_GAP:
                         shift_id_log = sd._active.get("shift_id", "")
-                        # Post summary before ending the shift (to control group)
+                        _ended_shift = dict(sd._active)
                         from fleet_pipeline.config import (
                             WA_CONTROL_GROUP_JID,
                             WA_GROUP_JID,
                         )
 
                         summary_jid = WA_CONTROL_GROUP_JID or WA_GROUP_JID
+                        from fleet_pipeline.pipeline.wa_notifier import (
+                            send_summary_to_group,
+                            send_shift_notification,
+                        )
                         if summary_jid:
                             try:
-                                from fleet_pipeline.pipeline.wa_notifier import (
-                                    send_summary_to_group,
-                                )
-
                                 send_summary_to_group(summary_jid, _DB_PATH)
                             except Exception as _exc:
                                 log.warning("Auto-end summary post failed: %s", _exc)
@@ -121,6 +121,12 @@ async def lifespan(application: FastAPI):
                             shift_id_log,
                             gap,
                         )
+                        # Send shift end WA notification
+                        if summary_jid:
+                            try:
+                                send_shift_notification(_ended_shift, "end", summary_jid, _DB_PATH)
+                            except Exception as _notif_exc:
+                                log.warning("Auto-end shift notification failed: %s", _notif_exc)
                         # Close any open truck cycles at shift end
                         try:
                             from fleet_pipeline.pipeline.committer import (
@@ -156,7 +162,7 @@ async def lifespan(application: FastAPI):
             _fleet = _os.environ.get("WA_GROUP_JID", "").strip()
             summary_jid = _ctrl or _fleet
             if not summary_jid:
-                log.debug("Periodic summary: no WA group JID configured — skipping")
+                log.info("Periodic summary: no WA group JID configured — skipping")
                 continue
 
             # Only send when there is an active (open) shift
@@ -166,7 +172,7 @@ async def lifespan(application: FastAPI):
                         "SELECT shift_id FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1"
                     ).fetchone()
                 if not _active:
-                    log.debug("Periodic summary: no active shift — skipping")
+                    log.info("Periodic summary: no active shift — skipping")
                     continue
             except Exception as _chk_exc:
                 log.warning("Periodic summary shift-check failed: %s", _chk_exc)
@@ -174,7 +180,9 @@ async def lifespan(application: FastAPI):
 
             try:
                 from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group as _send_summary
-                _send_summary(summary_jid, _DB_PATH2)
+                from functools import partial as _partial
+                _loop = asyncio.get_event_loop()
+                await _loop.run_in_executor(None, _partial(_send_summary, summary_jid, _DB_PATH2))
                 log.info("Periodic 15-min summary posted (jid=%s…)", summary_jid[:8])
             except Exception as _exc:
                 log.warning("Periodic summary post failed: %s", _exc)

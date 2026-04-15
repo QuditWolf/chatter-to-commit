@@ -194,7 +194,9 @@ def process_raw_text(
     _sd_conn.execute("PRAGMA journal_mode=WAL")
     _sd_conn.execute("PRAGMA foreign_keys=ON")
     sd = ShiftDetector(_sd_conn)
+    _had_active = bool(sd._active)
     shift_id = sd.process_message(raw_text, timestamp_iso)
+    _auto_started_shift = dict(sd._active) if (not _had_active and sd._active) else None
     _sd_conn.commit()
     _sd_conn.close()
 
@@ -213,6 +215,8 @@ def process_raw_text(
     summary["raw_text"] = raw_text
     summary["timestamp_iso"] = timestamp_iso
     summary["shift_id"] = shift_id
+    if _auto_started_shift:
+        summary["auto_started_shift"] = _auto_started_shift
     if llm_error:
         summary["llm_error"] = llm_error
         summary["unmapped"] = True

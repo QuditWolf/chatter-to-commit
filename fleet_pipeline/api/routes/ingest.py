@@ -183,6 +183,19 @@ async def _process_and_broadcast(
         # If a pending msg_id was known up front, attach it so frontend can correlate
         if msg_id and not summary.get("msg_id"):
             summary["msg_id"] = msg_id
+
+        # If this fleet message auto-started a new shift, send the WA notification
+        if summary.get("auto_started_shift"):
+            from fleet_pipeline.config import DB_PATH as _DB_PATH_AS, WA_CONTROL_GROUP_JID as _CTRL_JID_AS
+            from fleet_pipeline.pipeline.wa_notifier import send_shift_notification as _send_shift_notif
+            _notif_jid = _CTRL_JID_AS or group_jid
+            try:
+                _send_shift_notif(summary["auto_started_shift"], "start", _notif_jid, _DB_PATH_AS)
+                log.info("[FLEET] Auto-started shift %s — shift start notification sent", summary["auto_started_shift"].get("shift_id", "")[:8])
+            except Exception as _notif_exc:
+                log.warning("[FLEET] Auto-start shift notification failed: %s", _notif_exc)
+            await ws_manager.broadcast("shift_changed", {"reason": "auto_start"})
+
         await _broadcast_summary(summary, source)
     except Exception as exc:
         log.error("Background pipeline error: %s", exc)
