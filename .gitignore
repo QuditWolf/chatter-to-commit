@@ -67,6 +67,8 @@ docker-compose.override.yml
 _archive/
 *.bak
 *.tmp
+*ive_done*
+*ive_done*.md
 
 # ── Internal dev notes (not for public repo) ──────────────────────────────────
 docs/harden_production_spec.md
