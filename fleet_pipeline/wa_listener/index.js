@@ -50,7 +50,13 @@ try {
 
 function _writeLine(level, args) {
     const msg = args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
-    const line = `${new Date().toISOString()} [${level}] ${msg}\n`;
+    // IST = UTC + 5:30
+    const now = new Date();
+    const istOffset = 5.5 * 60 * 60 * 1000;
+    const ist = new Date(now.getTime() + (now.getTimezoneOffset() * 60000) + istOffset);
+    const pad = n => String(n).padStart(2, '0');
+    const istStr = `${ist.getFullYear()}-${pad(ist.getMonth()+1)}-${pad(ist.getDate())}T${pad(ist.getHours())}:${pad(ist.getMinutes())}:${pad(ist.getSeconds())}+05:30`;
+    const line = `${istStr} [${level}] ${msg}\n`;
     process.stdout.write(line);
     if (_logStream) _logStream.write(line);
 }

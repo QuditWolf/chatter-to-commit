@@ -44,6 +44,7 @@ from fleet_pipeline.api.agent_query import agent_answer
 def _setup_file_logging() -> None:
     """Add a rotating file handler to all relevant loggers so logs land in LOGS_DIR/api.log."""
     from fleet_pipeline.config import LOGS_DIR
+    import pytz
 
     logs_dir = Path(LOGS_DIR)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -53,10 +54,19 @@ def _setup_file_logging() -> None:
         backupCount=5,
         encoding="utf-8",
     )
+
+    class ISTFormatter(logging.Formatter):
+        def formatTime(self, record, datefmt=None):
+            ist = pytz.timezone("Asia/Kolkata")
+            dt = datetime.fromtimestamp(record.created, tz=ist)
+            if datefmt:
+                return dt.strftime(datefmt)
+            return dt.isoformat()
+
     handler.setFormatter(
-        logging.Formatter(
+        ISTFormatter(
             "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-            datefmt="%Y-%m-%dT%H:%M:%S",
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
         )
     )
     # Root logger catches fleet_pipeline.* and anything else not listed below
@@ -107,12 +117,15 @@ async def lifespan(application: FastAPI):
                             send_summary_to_group,
                             send_shift_notification,
                         )
+
                         if summary_jid:
                             try:
                                 send_summary_to_group(summary_jid, _DB_PATH)
                             except Exception as _exc:
                                 log.warning("Auto-end summary post failed: %s", _exc)
-                        _ended_shift_id = sd._active.get("shift_id") if sd._active else shift_id_log
+                        _ended_shift_id = (
+                            sd._active.get("shift_id") if sd._active else shift_id_log
+                        )
                         _end_ts = now_ist()
                         sd._end(_end_ts)
                         conn.commit()
@@ -124,9 +137,13 @@ async def lifespan(application: FastAPI):
                         # Send shift end WA notification
                         if summary_jid:
                             try:
-                                send_shift_notification(_ended_shift, "end", summary_jid, _DB_PATH)
+                                send_shift_notification(
+                                    _ended_shift, "end", summary_jid, _DB_PATH
+                                )
                             except Exception as _notif_exc:
-                                log.warning("Auto-end shift notification failed: %s", _notif_exc)
+                                log.warning(
+                                    "Auto-end shift notification failed: %s", _notif_exc
+                                )
                         # Close any open truck cycles at shift end
                         try:
                             from fleet_pipeline.pipeline.committer import (
@@ -179,10 +196,15 @@ async def lifespan(application: FastAPI):
                 continue
 
             try:
-                from fleet_pipeline.pipeline.wa_notifier import send_summary_to_group as _send_summary
+                from fleet_pipeline.pipeline.wa_notifier import (
+                    send_summary_to_group as _send_summary,
+                )
                 from functools import partial as _partial
+
                 _loop = asyncio.get_event_loop()
-                await _loop.run_in_executor(None, _partial(_send_summary, summary_jid, _DB_PATH2))
+                await _loop.run_in_executor(
+                    None, _partial(_send_summary, summary_jid, _DB_PATH2)
+                )
                 log.info("Periodic 15-min summary posted (jid=%s…)", summary_jid[:8])
             except Exception as _exc:
                 log.warning("Periodic summary post failed: %s", _exc)
@@ -195,7 +217,10 @@ async def lifespan(application: FastAPI):
             WA_GROUP_JID,
             DB_PATH as _DB_PATH3,
         )
-        from fleet_pipeline.pipeline.wa_notifier import _post_send_message, _resolve_group_jid
+        from fleet_pipeline.pipeline.wa_notifier import (
+            _post_send_message,
+            _resolve_group_jid,
+        )
 
         # Track which (shift_id, truck_id) pairs have been alerted this session
         _alerted: set = set()
@@ -247,7 +272,9 @@ async def lifespan(application: FastAPI):
                             alert_jid,
                             f"⚠️ *{alias}* has been in loading for more than 1 hour — has it been loaded yet?",
                         )
-                        log.info("Loading alert sent for truck %s shift %s", alias, sid[:8])
+                        log.info(
+                            "Loading alert sent for truck %s shift %s", alias, sid[:8]
+                        )
                     except Exception as _ae:
                         log.warning("Loading alert send failed: %s", _ae)
             except Exception as _exc:
