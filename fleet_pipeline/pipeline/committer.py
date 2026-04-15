@@ -47,10 +47,10 @@ VALID_STATUSES = {"ENTER", "LS", "LO", "LEFT", "US", "UO", "UNKNOWN"}
 #   LO/UO: 50 min — loading/unloading over   → infer LEFT non-blocking
 _CYCLE_GAP_BY_STATUS = {
     "ENTER": 85 * 60,
-    "LS":    60 * 60,
-    "US":    60 * 60,
-    "LO":    50 * 60,
-    "UO":    50 * 60,
+    "LS": 60 * 60,
+    "US": 60 * 60,
+    "LO": 50 * 60,
+    "UO": 50 * 60,
 }
 CYCLE_GAP_THRESHOLD_SECONDS = 60 * 60  # kept for log messages only
 
@@ -366,7 +366,9 @@ def _detect_and_fill_cycle_gap(
         if new_cycle_pos > last_cycle_pos:
             continue
 
-        truck_alias = last_event_row["truck_alias"] or ev.get("truck_alias", "") or truck_id
+        truck_alias = (
+            last_event_row["truck_alias"] or ev.get("truck_alias", "") or truck_id
+        )
         site_id = last_event_row["site_id"] or ev.get("site_id")
         site_alias = last_event_row["site_alias"] or ev.get("site_alias", "") or ""
 
@@ -483,7 +485,11 @@ def _infer_cycle_completion(
         inserted.append((status, _fmt_ts(ts)))
         log.info(
             "[INFERRED] %s %s → @%s (gap >= %dmin since %s)",
-            truck_alias or truck_id, status, site_alias or site_id, threshold_min, last_status,
+            truck_alias or truck_id,
+            status,
+            site_alias or site_id,
+            threshold_min,
+            last_status,
         )
 
     truck_display = truck_alias or truck_id
@@ -570,7 +576,10 @@ def _infer_full_cycle_for_enter_gap(
             held_event_ids.append(event_id)
             log.info(
                 "[HELD] %s %s → @%s (ENTER→ENTER gap %dmin, pending confirmation)",
-                truck_display, status, site_display, gap_min,
+                truck_display,
+                status,
+                site_display,
+                gap_min,
             )
 
     notification = {
@@ -611,6 +620,13 @@ def close_open_cycles_at_shift_end(
     """
     Close all open truck cycles at shift end by inserting inferred completion events.
     Called when a shift ends (via WA signal, manual, or auto-end inactivity).
+
+    Timestamp rules for inferred events:
+      - LS → LO = LS + 30 minutes
+      - LO → LEFT = LO + 5 minutes (LS + 35 minutes total)
+      - US → UO = US + 30 minutes
+      - UO → LEFT = UO + 5 minutes
+      - ENTER (no LS) → LEFT at shift end only (not counted as loaded — no loading confirmed)
     """
     from datetime import timedelta
 
@@ -641,7 +657,10 @@ def close_open_cycles_at_shift_end(
         else:
             end_ts = shift_end_ts
         if not end_ts:
-            log.warning("close_open_cycles_at_shift_end: cannot parse shift_end_ts=%r", shift_end_ts)
+            log.warning(
+                "close_open_cycles_at_shift_end: cannot parse shift_end_ts=%r",
+                shift_end_ts,
+            )
             return
 
         for row in rows:
@@ -658,22 +677,50 @@ def close_open_cycles_at_shift_end(
             site_alias = row["site_alias"] or ""
 
             events_to_create: List[Tuple] = []
+
             if last_status == "ENTER":
-                events_to_create = [
-                    ("LS", end_ts - timedelta(minutes=35)),
-                    ("LO", end_ts - timedelta(minutes=5)),
-                    ("LEFT", end_ts),
-                ]
+                # No LS recorded — truck may have left empty or gone to unloading site.
+                # Only mark departure, don't create a fake loading cycle (not counted as loaded).
+                events_to_create = [("LEFT", end_ts)]
+
             elif last_status == "LS":
-                events_to_create = [
-                    ("LO", end_ts - timedelta(minutes=5)),
-                    ("LEFT", end_ts),
-                ]
+                # Get LS timestamp to calculate LO = LS + 30 min, LEFT = LO + 5 min
+                ls_row = conn.execute(
+                    """SELECT timestamp_effective FROM events
+                       WHERE truck_id=? AND shift_id=? AND status='LS'
+                         AND commit_status IN ('COMMITTED','FLAGGED')
+                       ORDER BY timestamp_effective DESC LIMIT 1""",
+                    (truck_id, shift_id),
+                ).fetchone()
+                if ls_row:
+                    ls_ts = _parse_ts(ls_row["timestamp_effective"])
+                    if ls_ts:
+                        lo_ts = ls_ts + timedelta(minutes=30)  # LS + 30 min
+                        left_ts = lo_ts + timedelta(minutes=5)  # LO + 5 min
+                        events_to_create = [
+                            ("LO", lo_ts),
+                            ("LEFT", left_ts),
+                        ]
+
             elif last_status == "US":
-                events_to_create = [
-                    ("UO", end_ts - timedelta(minutes=5)),
-                    ("LEFT", end_ts),
-                ]
+                # Get US timestamp to calculate UO = US + 30 min, LEFT = UO + 5 min
+                us_row = conn.execute(
+                    """SELECT timestamp_effective FROM events
+                       WHERE truck_id=? AND shift_id=? AND status='US'
+                         AND commit_status IN ('COMMITTED','FLAGGED')
+                       ORDER BY timestamp_effective DESC LIMIT 1""",
+                    (truck_id, shift_id),
+                ).fetchone()
+                if us_row:
+                    us_ts = _parse_ts(us_row["timestamp_effective"])
+                    if us_ts:
+                        uo_ts = us_ts + timedelta(minutes=30)  # US + 30 min
+                        left_ts = uo_ts + timedelta(minutes=5)  # UO + 5 min
+                        events_to_create = [
+                            ("UO", uo_ts),
+                            ("LEFT", left_ts),
+                        ]
+
             elif last_status in ("LO", "UO"):
                 events_to_create = [("LEFT", end_ts)]
 
@@ -701,17 +748,21 @@ def close_open_cycles_at_shift_end(
                 )
 
             if events_to_create:
-                trucks_closed.append({
-                    "truck_alias": truck_alias,
-                    "truck_id": truck_id,
-                    "site_alias": site_alias,
-                    "site_id": site_id,
-                    "last_status": last_status,
-                    "inferred_statuses": [s for s, _ in events_to_create],
-                })
+                trucks_closed.append(
+                    {
+                        "truck_alias": truck_alias,
+                        "truck_id": truck_id,
+                        "site_alias": site_alias,
+                        "site_id": site_id,
+                        "last_status": last_status,
+                        "inferred_statuses": [s for s, _ in events_to_create],
+                    }
+                )
                 log.info(
                     "[SHIFT-END] Auto-closed cycle for %s at %s (was: %s)",
-                    truck_alias, site_alias or site_id, last_status,
+                    truck_alias,
+                    site_alias or site_id,
+                    last_status,
                 )
 
     if trucks_closed and group_jid:
@@ -723,7 +774,9 @@ def close_open_cycles_at_shift_end(
 
             notify_jid = _resolve_group_jid(group_jid)
             if notify_jid:
-                lines = ["Shift ended. Open cycles auto-closed (inferred at shift-end time)."]
+                lines = [
+                    "Shift ended. Open cycles auto-closed (inferred at shift-end time)."
+                ]
                 for t in trucks_closed:
                     inferred = ", ".join(t["inferred_statuses"])
                     lines.append(
@@ -1357,10 +1410,12 @@ class Committer:
         # Sort events: timestamp first, then cycle order.
         # This ensures multi-cycle batches (rare) are committed in correct order.
         _STATUS_ORDER = {"ENTER": 0, "LS": 1, "US": 1, "LO": 2, "UO": 2, "LEFT": 3}
-        events.sort(key=lambda e: (
-            e.get("timestamp_effective", ""),
-            _STATUS_ORDER.get(e.get("status", ""), 99),
-        ))
+        events.sort(
+            key=lambda e: (
+                e.get("timestamp_effective", ""),
+                _STATUS_ORDER.get(e.get("status", ""), 99),
+            )
+        )
 
         # ── Inferred-event timestamp offsetting ──────────────────────────────
         # When a message contains multiple explicit events for the same truck

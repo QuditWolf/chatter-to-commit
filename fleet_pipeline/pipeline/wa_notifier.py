@@ -451,7 +451,7 @@ def send_summary_to_group(group_jid: str, db_path: str, shift_id: str = None) ->
 
                 # Build summary text
                 lines = [f"\u2500\u2500 {shift_name} summary \u2500\u2500"]
-                lines.append(f"Total Trolleys Loaded (all sites) = {total_loaded}")
+                lines.append(f"*Total Trolleys Loaded (all sites) = {total_loaded}*")
                 for r in loaded_by_site:
                     lines.append(f"  Trolleys Loaded @{r['site_label']} = {r['cnt']}")
                 lines.append(f"Trolleys Reached = {total_reached}")
