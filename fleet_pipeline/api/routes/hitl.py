@@ -243,16 +243,26 @@ async def submit_answer(req: AnswerRequest, background_tasks: BackgroundTasks):
             )
 
     if reprocess and raw_text:
-        # Get original message metadata
+        # Get original message metadata — including the shift_id from the original event
+        # so HITL answers answered in a later shift don't pollute the corrected event.
         with db.db_conn(DB_PATH) as conn2:
             msg_row = conn2.execute(
                 "SELECT sender_name, sender_id, timestamp_iso FROM raw_messages WHERE msg_id=?",
                 (msg_id,)
             ).fetchone() if msg_id else None
+            # Look up the shift_id from the original event(s) for this message.
+            # Use the earliest non-DELETED event so HITL re-processing stays in the
+            # correct (original) shift even if the answer arrives during a later shift.
+            orig_shift_row = conn2.execute(
+                "SELECT shift_id FROM events WHERE msg_id=? AND commit_status != 'DELETED' "
+                "ORDER BY created_at ASC LIMIT 1",
+                (msg_id,)
+            ).fetchone() if msg_id else None
 
-        sender_name = (msg_row["sender_name"] if msg_row else None) or "operator"
-        sender_id   = (msg_row["sender_id"]   if msg_row else None) or "operator"
-        timestamp   = (msg_row["timestamp_iso"] if msg_row else None)
+        sender_name    = (msg_row["sender_name"] if msg_row else None) or "operator"
+        sender_id      = (msg_row["sender_id"]   if msg_row else None) or "operator"
+        timestamp      = (msg_row["timestamp_iso"] if msg_row else None)
+        orig_shift_id  = (orig_shift_row["shift_id"] if orig_shift_row else None)
 
         background_tasks.add_task(
             _reprocess_with_clarification,
@@ -261,6 +271,7 @@ async def submit_answer(req: AnswerRequest, background_tasks: BackgroundTasks):
             sender_name=sender_name,
             sender_id=sender_id,
             timestamp_iso=timestamp,
+            force_shift_id=orig_shift_id,
         )
         return {"status": "reprocessing", "question_id": req.question_id}
 
@@ -275,8 +286,14 @@ async def _reprocess_with_clarification(
     sender_name: str,
     sender_id: str,
     timestamp_iso: Optional[str],
+    force_shift_id: Optional[str] = None,
 ):
-    """Re-run the message through the full LLM pipeline with operator's clarification."""
+    """Re-run the message through the full LLM pipeline with operator's clarification.
+
+    force_shift_id: when set, bypasses ShiftDetector and pins the reprocessed event to
+    the original message's shift — prevents HITL answers in a later shift from
+    incorrectly associating the corrected event with the current shift.
+    """
     from functools import partial
     from fleet_pipeline.api.pipeline_service import process_raw_text
     from fleet_pipeline.api.routes.ingest import _broadcast_summary
@@ -294,6 +311,7 @@ async def _reprocess_with_clarification(
                 timestamp_iso=timestamp_iso,
                 source="hitl_reprocess",
                 operator_clarification=operator_clarification,
+                force_shift_id=force_shift_id,
             ),
         )
         await _broadcast_summary(summary, "hitl_reprocess")

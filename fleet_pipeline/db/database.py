@@ -338,20 +338,39 @@ def get_fleet_state(
     return [dict(r) for r in rows]
 
 
-def get_l3_context(conn: sqlite3.Connection, limit: int = 20) -> List[Dict]:
+def get_l3_context(
+    conn: sqlite3.Connection,
+    limit: int = 20,
+    shift_id: Optional[str] = None,
+) -> List[Dict]:
     """
     Return recent events for L3 context — latest event per truck plus recent history.
     Includes COMMITTED and FLAGGED events (not HELD/DELETED).
     Used to populate l3_history for state inference.
+
+    When shift_id is provided, only events from that shift are returned so that
+    prior-shift state does not bleed into the current shift's LLM context window.
     """
-    rows = conn.execute(
-        """SELECT truck_id, truck_alias, site_id, site_alias, status,
-                  timestamp_effective, inferred, commit_status
-           FROM events
-           WHERE commit_status IN ('COMMITTED', 'FLAGGED') AND truck_id IS NOT NULL
-           ORDER BY timestamp_effective DESC LIMIT ?""",
-        (limit,),
-    ).fetchall()
+    if shift_id:
+        rows = conn.execute(
+            """SELECT truck_id, truck_alias, site_id, site_alias, status,
+                      timestamp_effective, inferred, commit_status
+               FROM events
+               WHERE commit_status IN ('COMMITTED', 'FLAGGED')
+                 AND truck_id IS NOT NULL
+                 AND shift_id = ?
+               ORDER BY timestamp_effective DESC LIMIT ?""",
+            (shift_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT truck_id, truck_alias, site_id, site_alias, status,
+                      timestamp_effective, inferred, commit_status
+               FROM events
+               WHERE commit_status IN ('COMMITTED', 'FLAGGED') AND truck_id IS NOT NULL
+               ORDER BY timestamp_effective DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 

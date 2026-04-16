@@ -78,6 +78,7 @@ def process_raw_text(
     wa_message_id: Optional[str] = None,
     group_jid: Optional[str] = None,
     quoted_wa_message_id: Optional[str] = None,
+    force_shift_id: Optional[str] = None,
 ) -> dict:
     """
     Run a raw message string through the full Level1→2→3→Commit pipeline.
@@ -87,6 +88,9 @@ def process_raw_text(
                    stored on HITL questions for reply routing.
     group_jid:     WA group JID to send bot HITL clarification messages to.
     quoted_wa_message_id: WA message ID this message is replying to (for reply-to-context).
+    force_shift_id: when set, bypass ShiftDetector and assign this shift_id directly.
+                    Used by HITL reprocessing so that an answer received in a later shift
+                    does not re-associate the corrected event with the current shift.
     """
     _t_start = time.monotonic()
     _ts_ist = to_ist(timestamp_iso) if timestamp_iso else "?"
@@ -127,9 +131,12 @@ def process_raw_text(
     truck_registry = load_truck_registry(DB_PATH)
     site_registry = load_site_registry(DB_PATH)
 
-    # Load recent L3 context for state inference (last 20 committed events)
+    # Load recent L3 context for state inference (last 20 committed events).
+    # Scoped to the current shift so prior-shift state does not bleed into context.
     with db.db_conn(DB_PATH) as _ctx_conn:
-        l3_history = db.get_l3_context(_ctx_conn, limit=20)
+        _active_shift = db.get_active_shift(_ctx_conn)
+        _ctx_shift_id = _active_shift["shift_id"] if _active_shift else None
+        l3_history = db.get_l3_context(_ctx_conn, limit=20, shift_id=_ctx_shift_id)
 
     # Level 3 — LLM inference
     llm_error = None
@@ -186,19 +193,27 @@ def process_raw_text(
             "commit_recommendation": "HOLD",
         }
 
-    # Inject shift_id via shift detector
+    # Inject shift_id via shift detector.
+    # force_shift_id bypasses the detector entirely — used by HITL reprocessing to
+    # keep the corrected event pinned to the original message's shift even when the
+    # HITL answer arrives during a different (later) active shift.
     import sqlite3 as _sqlite3
 
-    _sd_conn = _sqlite3.connect(DB_PATH)
-    _sd_conn.row_factory = _sqlite3.Row
-    _sd_conn.execute("PRAGMA journal_mode=WAL")
-    _sd_conn.execute("PRAGMA foreign_keys=ON")
-    sd = ShiftDetector(_sd_conn)
-    _had_active = bool(sd._active)
-    shift_id = sd.process_message(raw_text, timestamp_iso)
-    _auto_started_shift = dict(sd._active) if (not _had_active and sd._active) else None
-    _sd_conn.commit()
-    _sd_conn.close()
+    _auto_started_shift = None
+    if force_shift_id:
+        shift_id = force_shift_id
+        log.info("[SHIFT] force_shift_id=%s — skipping ShiftDetector", shift_id[:8] if shift_id else "None")
+    else:
+        _sd_conn = _sqlite3.connect(DB_PATH)
+        _sd_conn.row_factory = _sqlite3.Row
+        _sd_conn.execute("PRAGMA journal_mode=WAL")
+        _sd_conn.execute("PRAGMA foreign_keys=ON")
+        sd = ShiftDetector(_sd_conn)
+        _had_active = bool(sd._active)
+        shift_id = sd.process_message(raw_text, timestamp_iso)
+        _auto_started_shift = dict(sd._active) if (not _had_active and sd._active) else None
+        _sd_conn.commit()
+        _sd_conn.close()
 
     if not result.get("shift_id") and shift_id:
         result["shift_id"] = shift_id
@@ -220,6 +235,22 @@ def process_raw_text(
     if llm_error:
         summary["llm_error"] = llm_error
         summary["unmapped"] = True
+
+    # Flag if any LO event was committed/flagged — used by ingest to trigger shift-end countdown
+    if (summary.get("committed", 0) + summary.get("flagged", 0)) > 0 and shift_id:
+        try:
+            with db.db_conn(DB_PATH) as _lo_conn:
+                _lo_row = _lo_conn.execute(
+                    """SELECT 1 FROM events
+                       WHERE msg_id=? AND status='LO'
+                         AND commit_status IN ('COMMITTED','FLAGGED')
+                       LIMIT 1""",
+                    (msg_id,),
+                ).fetchone()
+            if _lo_row:
+                summary["has_committed_lo"] = True
+        except Exception as _lo_exc:
+            log.warning("LO check failed: %s", _lo_exc)
 
     _elapsed = time.monotonic() - _t_start
     log.info(

@@ -360,6 +360,307 @@ ws_manager = ConnectionManager()
 # Expose broadcast so pipeline code can push events
 app.state.ws_manager = ws_manager
 
+# ── Pending shift-end countdown (Last LO detected → 5-min auto-end) ──────────
+
+# asyncio.Task that will end the shift after 5 minutes, or None if not pending.
+_pending_shift_end_task: Optional[asyncio.Task] = None
+
+# Per-shift guard: only fire the countdown once per shift so repeated LOs
+# (multiple trucks finishing) don't each reset the 5-minute window.
+_shift_end_countdown_fired_for: Optional[str] = None  # shift_id
+
+# ── Pending shift-start countdown ("Loading will start at X" → 5-min auto-start) ─
+
+# asyncio.Task that will start a new shift after 5 minutes, or None if not pending.
+_pending_shift_start_task: Optional[asyncio.Task] = None
+
+
+async def _shift_end_countdown(shift_id: str, delay_seconds: int = 300):
+    """
+    Wait `delay_seconds` then end the active shift — provided it is still the
+    same shift that triggered the countdown (i.e. operator didn't start a new one).
+
+    Called as an asyncio Task; can be cancelled by `cancel_shift_end_countdown`.
+    """
+    global _pending_shift_end_task, _shift_end_countdown_fired_for
+
+    import sqlite3 as _sq3
+    from fleet_pipeline.config import DB_PATH as _DB_PATH_se, WA_CONTROL_GROUP_JID as _CTRL_se, WA_GROUP_JID as _FLEET_se
+    from fleet_pipeline.pipeline.wa_notifier import (
+        send_summary_to_group as _send_sum_se,
+        send_shift_notification as _send_notif_se,
+        _post_send_message as _send_msg_se,
+        _resolve_group_jid as _resolve_se,
+    )
+    from fleet_pipeline.utils import now_ist as _now_se
+
+    try:
+        await asyncio.sleep(delay_seconds)
+    except asyncio.CancelledError:
+        log.info("[SHIFT-END-CD] Countdown cancelled before firing")
+        _pending_shift_end_task = None
+        return
+
+    # Task was not cancelled — proceed with shift end
+    log.info("[SHIFT-END-CD] 5-min countdown expired for shift %s — ending shift", shift_id[:8])
+    _pending_shift_end_task = None
+
+    jid = _resolve_se(_CTRL_se or _FLEET_se)
+
+    try:
+        _conn = _sq3.connect(_DB_PATH_se)
+        _conn.row_factory = _sq3.Row
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA foreign_keys=ON")
+
+        # Verify the same shift is still active
+        _active_row = _conn.execute(
+            "SELECT * FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0) ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+
+        if not _active_row or _active_row["shift_id"] != shift_id:
+            log.info("[SHIFT-END-CD] Active shift has changed — skipping auto-end")
+            _conn.close()
+            return
+
+        _ended_shift = dict(_active_row)
+        _end_ts = _now_se()
+
+        # Post summary before ending
+        if jid:
+            try:
+                _send_sum_se(jid, _DB_PATH_se)
+            except Exception as _se_exc:
+                log.warning("[SHIFT-END-CD] Summary post failed: %s", _se_exc)
+
+        # End the shift via ShiftDetector
+        from fleet_pipeline.pipeline.shift_detector import ShiftDetector as _SD_se
+        sd = _SD_se(_conn)
+        sd._end(_end_ts)
+        _conn.commit()
+        _conn.close()
+
+        log.info("[SHIFT-END-CD] Shift %s ended by LO countdown", shift_id[:8])
+
+        # Send shift-end WA notification
+        if jid:
+            try:
+                _send_notif_se(_ended_shift, "end", jid, _DB_PATH_se)
+            except Exception as _n_exc:
+                log.warning("[SHIFT-END-CD] Shift-end notification failed: %s", _n_exc)
+
+        # Close any open truck cycles
+        try:
+            from fleet_pipeline.pipeline.committer import close_open_cycles_at_shift_end as _close_cyc
+            _close_cyc(_DB_PATH_se, shift_id, _end_ts.isoformat(), group_jid=jid)
+        except Exception as _cyc_exc:
+            log.warning("[SHIFT-END-CD] Cycle close failed: %s", _cyc_exc)
+
+        await ws_manager.broadcast("shift_changed", {"reason": "lo_countdown_auto_end"})
+
+    except asyncio.CancelledError:
+        pass
+    except Exception as _exc:
+        log.error("[SHIFT-END-CD] Auto-end failed: %s", _exc)
+
+
+def schedule_shift_end_countdown(shift_id: str) -> bool:
+    """
+    Schedule a 5-minute countdown to auto-end the shift after the last LO.
+
+    Only fires once per shift (subsequent LOs in the same shift are ignored).
+    Returns True if a new countdown was scheduled, False if already pending/fired.
+
+    Must be called from an async context (the event loop must be running).
+    """
+    global _pending_shift_end_task, _shift_end_countdown_fired_for
+
+    if _shift_end_countdown_fired_for == shift_id:
+        log.info("[SHIFT-END-CD] Countdown already scheduled/fired for shift %s — ignoring", shift_id[:8])
+        return False
+
+    if _pending_shift_end_task and not _pending_shift_end_task.done():
+        log.info("[SHIFT-END-CD] Countdown task already running — ignoring duplicate LO")
+        return False
+
+    _shift_end_countdown_fired_for = shift_id
+    _pending_shift_end_task = asyncio.create_task(_shift_end_countdown(shift_id))
+    log.info("[SHIFT-END-CD] Scheduled shift-end countdown for shift %s (5 min)", shift_id[:8])
+    return True
+
+
+def cancel_shift_end_countdown() -> bool:
+    """
+    Cancel the pending shift-end countdown (operator replied 'cancel').
+
+    Returns True if a task was cancelled, False if nothing was pending.
+    Must be called from an async context.
+    """
+    global _pending_shift_end_task, _shift_end_countdown_fired_for
+
+    if _pending_shift_end_task and not _pending_shift_end_task.done():
+        _pending_shift_end_task.cancel()
+        _pending_shift_end_task = None
+        _shift_end_countdown_fired_for = None  # allow re-trigger on future LOs
+        log.info("[SHIFT-END-CD] Countdown cancelled by operator")
+        return True
+
+    log.info("[SHIFT-END-CD] Cancel requested but no pending countdown found")
+    return False
+
+
+# ── Shift-start countdown helpers ─────────────────────────────────────────────
+
+
+async def _shift_start_countdown(site_id: Optional[str], site_label: str, delay_seconds: int = 300):
+    """
+    Wait `delay_seconds` then start a new shift (or update the active shift's default
+    site if one is already running).
+
+    Called as an asyncio Task; can be cancelled by `cancel_shift_start_countdown`.
+    """
+    global _pending_shift_start_task
+
+    import sqlite3 as _sq3
+    from fleet_pipeline.config import DB_PATH as _DB_PATH_ss, WA_CONTROL_GROUP_JID as _CTRL_ss, WA_GROUP_JID as _FLEET_ss
+    from fleet_pipeline.pipeline.wa_notifier import (
+        send_shift_notification as _send_notif_ss,
+        _post_send_message as _send_msg_ss,
+        _resolve_group_jid as _resolve_ss,
+    )
+    from fleet_pipeline.utils import now_ist as _now_ss
+
+    try:
+        await asyncio.sleep(delay_seconds)
+    except asyncio.CancelledError:
+        log.info("[SHIFT-START-CD] Countdown cancelled before firing")
+        _pending_shift_start_task = None
+        return
+
+    _pending_shift_start_task = None
+    log.info("[SHIFT-START-CD] 5-min countdown expired — starting/updating shift at %s", site_label)
+
+    jid = _resolve_ss(_CTRL_ss or _FLEET_ss)
+
+    try:
+        _conn = _sq3.connect(_DB_PATH_ss)
+        _conn.row_factory = _sq3.Row
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA foreign_keys=ON")
+
+        # Check if a shift is already active
+        _active_row = _conn.execute(
+            "SELECT * FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0) ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+
+        if _active_row:
+            # Shift already active — update default site only
+            active_shift = dict(_active_row)
+            shift_id = active_shift["shift_id"]
+            import json as _json
+            existing_ids = []
+            try:
+                existing_ids = _json.loads(active_shift.get("default_site_ids") or "[]")
+            except Exception:
+                existing_ids = []
+            if site_id and site_id not in existing_ids:
+                existing_ids = [site_id] + existing_ids
+            new_ids_json = _json.dumps(existing_ids) if existing_ids else None
+            new_primary = existing_ids[0] if existing_ids else active_shift.get("default_site_id")
+            _conn.execute(
+                "UPDATE shifts SET default_site_id=?, default_site_ids=? WHERE shift_id=?",
+                (new_primary, new_ids_json, shift_id),
+            )
+            _conn.commit()
+            _conn.close()
+            log.info("[SHIFT-START-CD] Active shift %s updated — default site set to %s", shift_id[:8], site_label)
+            if jid:
+                _send_msg_ss(jid, f"\u2705 Shift default site updated to *{site_label}*.")
+        else:
+            # No active shift — start a new one
+            from fleet_pipeline.pipeline.shift_detector import ShiftDetector as _SD_ss
+            _ts = _now_ss()
+            sd = _SD_ss(_conn)
+            # Build a synthetic raw_text so _extract_sites_from_text picks up the site
+            _raw = f"shift start {site_id or site_label}"
+            sd._start_new(_ts, method="wa_loading_start", raw_text=_raw)
+            new_shift = sd._active
+            if new_shift:
+                _conn.execute(
+                    """INSERT INTO shift_events
+                       (shift_event_id, shift_id, status, timestamp_iso,
+                        commit_status, wa_message_id, site_id, site_ids_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        f"shift_start_{new_shift['shift_id']}",
+                        new_shift["shift_id"],
+                        "SHIFT_START",
+                        _ts.isoformat(),
+                        "COMMITTED",
+                        f"loading_start_auto_{_ts.isoformat()}",
+                        new_shift.get("default_site_id"),
+                        new_shift.get("default_site_ids"),
+                    ),
+                )
+            _conn.commit()
+            _conn.close()
+            log.info("[SHIFT-START-CD] New shift started at %s", site_label)
+            if new_shift and jid:
+                try:
+                    _send_notif_ss(new_shift, "start", jid, _DB_PATH_ss)
+                except Exception as _n_exc:
+                    log.warning("[SHIFT-START-CD] Shift-start notification failed: %s", _n_exc)
+
+        await ws_manager.broadcast("shift_changed", {"reason": "loading_start_auto"})
+
+    except asyncio.CancelledError:
+        pass
+    except Exception as _exc:
+        log.error("[SHIFT-START-CD] Auto-start failed: %s", _exc)
+
+
+def schedule_shift_start_countdown(site_id: Optional[str], site_label: str) -> bool:
+    """
+    Schedule a 5-minute countdown to auto-start a shift (or update the active shift's
+    default site) when a "loading will start at X" message arrives in the control group.
+
+    Cancels any previously pending shift-start countdown (new site announcement wins).
+    Returns True if a countdown was scheduled.
+
+    Must be called from an async context (the event loop must be running).
+    """
+    global _pending_shift_start_task
+
+    # Cancel any previously pending start countdown (new announcement supersedes old)
+    if _pending_shift_start_task and not _pending_shift_start_task.done():
+        _pending_shift_start_task.cancel()
+        log.info("[SHIFT-START-CD] Previous shift-start countdown cancelled (new site: %s)", site_label)
+
+    _pending_shift_start_task = asyncio.create_task(
+        _shift_start_countdown(site_id, site_label)
+    )
+    log.info("[SHIFT-START-CD] Scheduled shift-start countdown for site %s (5 min)", site_label)
+    return True
+
+
+def cancel_shift_start_countdown() -> bool:
+    """
+    Cancel the pending shift-start countdown (operator sent 'cancel').
+
+    Returns True if a task was cancelled, False if nothing was pending.
+    Must be called from an async context.
+    """
+    global _pending_shift_start_task
+
+    if _pending_shift_start_task and not _pending_shift_start_task.done():
+        _pending_shift_start_task.cancel()
+        _pending_shift_start_task = None
+        log.info("[SHIFT-START-CD] Countdown cancelled by operator")
+        return True
+
+    log.info("[SHIFT-START-CD] Cancel requested but no pending start countdown found")
+    return False
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):

@@ -322,11 +322,21 @@ def send_shift_list(group_jid: str, db_path: str) -> None:
         _post_send_message(group_jid, f"Error listing shifts: {str(exc)[:80]}")
 
 
-def send_summary_to_group(group_jid: str, db_path: str, shift_id: str = None) -> None:
+def send_summary_to_group(
+    group_jid: str,
+    db_path: str,
+    shift_id: str = None,
+    shift_suffix: str = None,
+) -> None:
     """
     Generate a shift summary and post it to the control group.
     If shift_id is given, summarise that specific shift; otherwise use the
     active shift (or last non-deleted shift as fallback).
+
+    shift_id="last" → force return of the most recently ended shift.
+    shift_suffix="_01" → fallback: search for any shift whose shift_id ends with
+    that suffix, ordered by started_at DESC (used when exact date+suffix lookup fails).
+
     Format:
       ── 2026-04-12_06 summary ──
       Total Trolleys Loaded (all sites) = N
@@ -342,16 +352,39 @@ def send_summary_to_group(group_jid: str, db_path: str, shift_id: str = None) ->
 
     import sqlite3
 
+    _NOT_DELETED = "(is_deleted IS NULL OR is_deleted = 0)"
+
     try:
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
 
             is_last = False
-            if shift_id:
+            if shift_id and shift_id.lower() == "last":
+                # Explicitly requested last (most recently ended) shift
                 shift = conn.execute(
-                    "SELECT shift_id, shift_number, shift_name, ended_at FROM shifts WHERE shift_id=? AND (is_deleted IS NULL OR is_deleted = 0)",
+                    f"""SELECT shift_id, shift_number, shift_name, ended_at
+                        FROM shifts WHERE {_NOT_DELETED}
+                        ORDER BY started_at DESC LIMIT 1"""
+                ).fetchone()
+                is_last = True
+            elif shift_id:
+                shift = conn.execute(
+                    f"SELECT shift_id, shift_number, shift_name, ended_at FROM shifts WHERE shift_id=? AND {_NOT_DELETED}",
                     (shift_id,),
                 ).fetchone()
+                if not shift and shift_suffix:
+                    # Primary guess (today+suffix) not found — search by suffix across all dates
+                    shift = conn.execute(
+                        f"""SELECT shift_id, shift_number, shift_name, ended_at
+                            FROM shifts WHERE shift_id LIKE ? AND {_NOT_DELETED}
+                            ORDER BY started_at DESC LIMIT 1""",
+                        (f"%{shift_suffix}",),
+                    ).fetchone()
+                    if shift:
+                        log.info(
+                            "send_summary_to_group: suffix fallback matched shift %s",
+                            shift["shift_id"],
+                        )
                 if not shift:
                     _post_send_message(group_jid, f"Shift not found: {shift_id}")
                     return
@@ -433,7 +466,7 @@ def send_summary_to_group(group_jid: str, db_path: str, shift_id: str = None) ->
                     (shift_id, shift_id),
                 ).fetchall()
                 in_loading_aliases = [
-                    r["truck_alias"] or r["truck_id"] for r in in_loading_rows
+                    r["truck_alias"] or r["truck_id"] or "?" for r in in_loading_rows
                 ]
                 in_loading_count = len(in_loading_aliases)
 

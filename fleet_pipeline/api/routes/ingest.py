@@ -197,6 +197,36 @@ async def _process_and_broadcast(
             await ws_manager.broadcast("shift_changed", {"reason": "auto_start"})
 
         await _broadcast_summary(summary, source)
+
+        # ── Last-LO shift-end countdown ───────────────────────────────────────
+        # When any LO event is committed/flagged, notify the control group and
+        # schedule a 5-minute countdown to auto-end the shift.
+        _lo_shift_id = summary.get("shift_id")
+        _has_lo = bool(summary.get("has_committed_lo"))
+        if _has_lo and _lo_shift_id:
+            try:
+                from fleet_pipeline.api.main import schedule_shift_end_countdown as _sched_cd
+                from fleet_pipeline.config import (
+                    WA_CONTROL_GROUP_JID as _CTRL_cd,
+                    WA_GROUP_JID as _FLEET_cd,
+                    DB_PATH as _DB_cd,
+                )
+                from fleet_pipeline.pipeline.wa_notifier import (
+                    _post_send_message as _msg_cd,
+                    _resolve_group_jid as _res_cd,
+                )
+
+                _jid_cd = _res_cd(_CTRL_cd or _FLEET_cd)
+                _scheduled = _sched_cd(_lo_shift_id)
+                if _scheduled and _jid_cd:
+                    _msg_cd(
+                        _jid_cd,
+                        "⏳ Last LO detected. Ending shift in 5 minutes. Reply *cancel* to cancel.",
+                    )
+                    log.info("[SHIFT-END-CD] Countdown notification sent (shift=%s)", _lo_shift_id[:8] if _lo_shift_id else "?")
+            except Exception as _cd_exc:
+                log.warning("[SHIFT-END-CD] Failed to schedule countdown: %s", _cd_exc)
+
     except Exception as exc:
         log.error("Background pipeline error: %s", exc)
         await ws_manager.broadcast(
@@ -685,6 +715,62 @@ async def _handle_control_message(
             log.error("Control shift signal handling failed: %s", exc)
         return
 
+    # ── "Loading will start at X" / "will load at X" — shift-start announcement ─
+    # Plain (non-reply) messages only. Triggers a 5-minute countdown: if not
+    # cancelled, the shift auto-starts (or the active shift's default site is updated).
+    _LOADING_START_RE = re.compile(
+        r"""
+        (?:
+            loading\s+will\s+start     # "loading will start at GKT"
+          | will\s+(?:load|start)\s+at # "will load at GKT" / "will start at GKT"
+          | loading\s+start(?:s|ing)?\s+at  # "loading starting at GKT"
+          | start(?:ing)?\s+(?:loading\s+)?at  # "starting at GKT" / "starting loading at GKT"
+          | (?:load|loading)\s+at      # "load at GKT" / "loading at GKT now"
+        )
+        (?:\s+\w+)*?\s*               # optional words between phrase and site
+        \b([A-Za-z0-9]{2,8})\b        # site code capture group
+        """,
+        re.I | re.VERBOSE,
+    )
+
+    if not is_reply:
+        _ls_match = _LOADING_START_RE.search(text)
+        if _ls_match:
+            import sqlite3 as _sq_ls
+            from fleet_pipeline.pipeline.shift_detector import _extract_sites_from_text as _ext_sites
+            from fleet_pipeline.pipeline.wa_notifier import (
+                _post_send_message as _msg_ls,
+                _resolve_group_jid as _res_ls,
+            )
+            from fleet_pipeline.api.main import schedule_shift_start_countdown as _sched_ss
+
+            _ls_jid = _res_ls(ctrl_jid)
+            _site_id_ls = None
+            _site_label_ls = _ls_match.group(1).upper()
+
+            try:
+                with _sq_ls.connect(DB_PATH) as _c_ls:
+                    _c_ls.row_factory = _sq_ls.Row
+                    _sites_ls = _ext_sites(_c_ls, text)
+                    if _sites_ls:
+                        _site_id_ls = _sites_ls[0]
+                        _site_label_ls = _site_id_ls
+            except Exception as _exc_ls:
+                log.warning("[SHIFT-START-CD] Site lookup failed: %s", _exc_ls)
+
+            log.info(
+                "[SHIFT-START-CD] Loading-start announcement detected — site=%s — scheduling 5-min countdown",
+                _site_label_ls,
+            )
+            _sched_ss(_site_id_ls, _site_label_ls)
+
+            if _ls_jid:
+                _msg_ls(
+                    _ls_jid,
+                    f"\u23f3 Starting new shift at *{_site_label_ls}* in 5 minutes. Reply *cancel* to cancel.",
+                )
+            return
+
     # ── Standalone shift control words (not replies, not shift signals) ────────
     # "no start" / "no end" / "resume" as plain standalone messages
     _SA_NO_START = re.compile(
@@ -712,6 +798,36 @@ async def _handle_control_message(
                     "shift_changed", {"reason": "standalone_resume"}
                 )
             return
+
+    # ── Cancel pending shift-end or shift-start countdown ─────────────────────
+    # Plain "cancel" (not a reply) aborts whichever 5-minute countdown is active.
+    _CANCEL_RE = re.compile(r"^\s*cancel\s*$", re.I)
+    if not is_reply and _CANCEL_RE.match(text):
+        try:
+            from fleet_pipeline.api.main import (
+                cancel_shift_end_countdown as _cancel_cd,
+                cancel_shift_start_countdown as _cancel_ss,
+            )
+            from fleet_pipeline.pipeline.wa_notifier import (
+                _post_send_message as _msg_cxl,
+                _resolve_group_jid as _res_cxl,
+            )
+
+            _jid_cxl = _res_cxl(ctrl_jid)
+            _cancelled_end = _cancel_cd()
+            _cancelled_start = _cancel_ss()
+            if _cancelled_end or _cancelled_start:
+                what = "Shift start" if _cancelled_start else "Shift end"
+                log.info("[CD] Operator cancelled %s countdown", what.lower())
+                if _jid_cxl:
+                    _msg_cxl(_jid_cxl, f"\u2705 {what} cancelled.")
+            else:
+                log.info("[CD] 'cancel' received but no countdown was pending")
+                if _jid_cxl:
+                    _msg_cxl(_jid_cxl, "\u2139\ufe0f No pending countdown to cancel.")
+        except Exception as _cxl_exc:
+            log.warning("[CD] Cancel handling failed: %s", _cxl_exc)
+        return
 
     # ── List shifts request ─────────────────────────────────────────────────────
     # Syntax: list shifts / show shifts / shifts
@@ -743,29 +859,40 @@ async def _handle_control_message(
     for pat in _SUMMARY_RE:
         if pat.search(text):
             shift_id = None
-            # Try to extract shift specifier: "_03" or "2026-04-15_03"
-            _SHIFT_SPEC_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})?(_\d+)\b")
-            m = _SHIFT_SPEC_RE.search(text)
-            if m:
-                date_part = m.group(1)  # e.g. "2026-04-15" or None
-                suffix_part = m.group(2)  # e.g. "_03"
-                if date_part:
-                    shift_id = f"{date_part}{suffix_part}"
-                else:
-                    # Try to find today's shift with this suffix
-                    import sqlite3 as _sq
-                    from datetime import datetime
-                    import pytz
+            shift_suffix = None  # suffix-only fallback (e.g. "_01") when date is unknown
 
-                    _IST = pytz.timezone("Asia/Kolkata")
-                    today = datetime.now(_IST).strftime("%Y-%m-%d")
-                    shift_id = f"{today}{suffix_part}"
+            # "last shift" / "last" → sentinel so wa_notifier returns the most recently ended shift
+            _LAST_RE = re.compile(r"\blast\s*(shift)?\b", re.I)
+            if _LAST_RE.search(text):
+                shift_id = "last"
+            else:
+                # Try to extract shift specifier: "_03" or "2026-04-15_03"
+                _SHIFT_SPEC_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})?(_\d{2})\b")
+                m = _SHIFT_SPEC_RE.search(text)
+                if m:
+                    date_part = m.group(1)  # e.g. "2026-04-15" or None
+                    suffix_part = m.group(2)  # e.g. "_03"
+                    if date_part:
+                        shift_id = f"{date_part}{suffix_part}"
+                    else:
+                        # No date given — try today as primary guess, pass suffix as
+                        # fallback so wa_notifier can search across all dates if today has none
+                        from datetime import datetime
+                        import pytz as _pytz
+
+                        _IST = _pytz.timezone("Asia/Kolkata")
+                        today = datetime.now(_IST).strftime("%Y-%m-%d")
+                        shift_id = f"{today}{suffix_part}"
+                        shift_suffix = suffix_part  # fallback: search any date with this suffix
             log.info(
-                "[CTRL] Summary request matched (shift_id=%s) — sending on-demand summary to group",
+                "[CTRL] Summary request matched (shift_id=%s, shift_suffix=%s) — sending on-demand summary to group",
                 shift_id,
+                shift_suffix,
             )
             try:
-                send_summary_to_group(group_jid, DB_PATH, shift_id=shift_id)
+                send_summary_to_group(
+                    group_jid, DB_PATH, shift_id=shift_id, shift_suffix=shift_suffix
+                )
             except Exception as exc:
                 log.warning("On-demand summary failed: %s", exc)
             return
