@@ -15,6 +15,8 @@ import os
 import urllib.request
 from typing import Dict, List, Optional, Any
 
+from fleet_pipeline.utils import to_ist
+
 log = logging.getLogger(__name__)
 
 WA_LISTENER_URL = os.environ.get("WA_LISTENER_URL", "http://localhost:3001")
@@ -598,6 +600,38 @@ def send_shift_notification(
                 _conn.commit()
         except Exception as exc:
             log.warning("send_shift_notification: could not store bot_msg_id: %s", exc)
+
+
+def send_shiftless_notification(event: dict, group_jid: str, db_path: str) -> None:
+    """
+    Send a WA notification when an event was committed but no shift exists covering
+    the event's timestamp. Asks operator to insert a shift manually.
+    """
+    group_jid = _resolve_group_jid(group_jid)
+    if not group_jid:
+        return
+
+    truck = event.get("truck_alias") or event.get("truck_id") or "?"
+    status = event.get("status", "?")
+    site = event.get("site_alias") or event.get("site_id") or "?"
+    ev_ts_iso = event.get("event_timestamp", "") or ""
+    raw_text = (event.get("raw_text") or "").strip()
+    sender = (event.get("sender_name") or "").strip()
+
+    try:
+        ev_ts = to_ist(ev_ts_iso) if ev_ts_iso else "?"
+    except Exception:
+        ev_ts = ev_ts_iso or "?"
+
+    text = (
+        f"\u26a0 No shift found for event at *{ev_ts}*\n"
+        f"Committed: *{truck} {status}* @ {site}\n"
+        f'_Msg: "{raw_text[:80]}"_\n'
+        f"Sender: {sender}\n\n"
+        f"Please insert a shift covering this time manually."
+    )
+
+    _post_send_message(group_jid, text)
 
 
 def send_commit_notification(event: dict, group_jid: str, db_path: str) -> None:

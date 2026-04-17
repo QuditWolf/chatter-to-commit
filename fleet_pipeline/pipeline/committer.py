@@ -930,6 +930,25 @@ class Committer:
                 except Exception as _exc:
                     log.warning("Failed to send commit notification: %s", _exc)
 
+        # Send WA notifications for shiftless events (committed/flagged but no shift covers
+        # the event's timestamp — operator must manually insert a shift)
+        for notif_ev in summary.pop("_shiftless_notifications", []):
+            if self.group_jid:
+                try:
+                    from fleet_pipeline.pipeline.wa_notifier import (
+                        send_shiftless_notification,
+                        _resolve_group_jid,
+                    )
+                    from fleet_pipeline.config import WA_CONTROL_GROUP_JID
+
+                    notify_jid = _resolve_group_jid(
+                        WA_CONTROL_GROUP_JID or self.group_jid
+                    )
+                    if notify_jid:
+                        send_shiftless_notification(notif_ev, notify_jid, self.db_path)
+                except Exception as _exc:
+                    log.warning("Failed to send shiftless notification: %s", _exc)
+
         # Send WA notifications for auto-created trucks (after DB commit)
         for new_truck_id, alias in summary.pop("_new_trucks", []):
             if self.group_jid:
@@ -1485,6 +1504,14 @@ class Committer:
                     )
                 continue
 
+            # Determine per-event shift from timestamp_effective BEFORE site inference
+            # so site inference uses the correct shift.
+            _ev_ts = ev.get("timestamp_effective", "")
+            if _ev_ts and self.shift_detector:
+                _per_shift = self.shift_detector.resolve_shift_for_event(_ev_ts)
+                if _per_shift:
+                    ev["shift_id"] = _per_shift
+
             # Site inference — applied only when LLM didn't provide a site.
             # Priority: same sender same shift → any sender same shift → single default site.
             # Multiple default sites → UNKNOWN_SITE HITL.
@@ -1684,13 +1711,15 @@ class Committer:
             # to overwrite every previous event with the same primary key.
             event_id = str(uuid4())
 
-            # Spec rule: if shift is ambiguous → assign last active shift + flag amber
+            # Resolve final shift: per-event from timestamp_effective, else message-level.
+            # Set _no_shift flag so committer notifies WA if no shift found.
+            ev_ts = ev.get("timestamp_effective", "")
             ev_shift_id = ev.get("shift_id") or resolved_shift_id
             if not ev_shift_id:
-                ev_shift_id = resolved_shift_id  # may still be None
-                # Downgrade to FLAGGED if we had COMMITTED but no shift
                 if event_commit_status == "COMMITTED":
                     event_commit_status = "FLAGGED"
+                ev["_no_shift"] = True
+                ev["_event_timestamp"] = ev_ts
 
             # Derive commit_path label for UI
             # "red" (HELD) is no longer produced — every event is COMMITTED or FLAGGED.
@@ -1751,6 +1780,22 @@ class Committer:
                         "status": status,
                         "confidence": ev_confidence,
                         "inferred": ev.get("inferred", False),
+                        "raw_text": raw_text,
+                        "timestamp_ist": _msg_timestamp_ist,
+                        "sender_name": _msg_sender,
+                    }
+                )
+
+            if ev.get("_no_shift") and not self.simulation_run_id:
+                summary.setdefault("_shiftless_notifications", []).append(
+                    {
+                        "event_id": event_id,
+                        "truck_id": truck_id,
+                        "truck_alias": truck_alias,
+                        "site_id": site_id,
+                        "site_alias": site_alias,
+                        "status": status,
+                        "event_timestamp": ev.get("_event_timestamp", ""),
                         "raw_text": raw_text,
                         "timestamp_ist": _msg_timestamp_ist,
                         "sender_name": _msg_sender,

@@ -430,9 +430,14 @@ async function startListener() {
           const wa_message_id = msg.key.id || `${Date.now()}-${Math.random()}`;
           const sender_phone  = msg.key.participant || jid;
           const sender_name   = msg.pushName || null;
-          const received_at   = new Date(
-            msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now()
-          ).toISOString();
+          // Build IST ISO string (UTC+5:30) so the backend stores a consistent
+          // timezone-aware timestamp regardless of where the server is running.
+          const _ms = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now();
+          const _istMs = _ms + 5.5 * 60 * 60 * 1000;
+          const _id = new Date(_istMs);
+          const _p = n => String(n).padStart(2, '0');
+          const received_at = `${_id.getUTCFullYear()}-${_p(_id.getUTCMonth()+1)}-${_p(_id.getUTCDate())}` +
+            `T${_p(_id.getUTCHours())}:${_p(_id.getUTCMinutes())}:${_p(_id.getUTCSeconds())}+05:30`;
           // Determine which group this message came from
           const source_group = (CONTROL_GROUP_JID && jid === CONTROL_GROUP_JID)
             ? "control"

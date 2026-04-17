@@ -9,8 +9,7 @@ Rules:
 2. Shifts start only via explicit WA signals from the control group:
    - "shift start", "s1/s2/s3", "shift 1/2/3"
    - Mobilisation messages: "tracking volunteers please reach X and Y"
-   - If no shift exists at all, the first fleet message still auto-starts one
-     as a fallback (method="auto_start").
+   - Fleet messages do NOT auto-start a shift; shiftless events trigger a WA alert.
 
 3. Shifts end via explicit WA signals (from the control group, non-reply):
    - "shift end/over/done"
@@ -24,6 +23,10 @@ Rules:
    - A WA end signal arrives (control group)
    - The background task detects AUTO_END_GAP inactivity
    - Operator presses End / Start
+
+6. No gap shifts are created automatically. If no existing shift covers the message/event
+   timestamp, shift_id=None is returned. The committer sends a WA alert to the control
+   group asking the operator to insert a shift manually.
 
 Operator API helpers (module-level, no singleton state needed):
    operator_start(db_path)   → start a new shift now
@@ -113,12 +116,13 @@ class ShiftDetector:
         Determine the shift_id for this message.
         May create or close shift records as a side-effect.
         Returns shift_id str or None.
+
+        Rule: look up existing shift covering the message timestamp. No gap-fill.
         """
         ts = _parse_iso(timestamp_iso)
         if ts is None:
             return self._active_id()
 
-        # 1. WA signal override
         signal = detect_shift_signal(raw_text)
         if signal == "start":
             self._start_new(ts, method="wa_signal", raw_text=raw_text)
@@ -129,14 +133,53 @@ class ShiftDetector:
             self._last_ts = ts
             return None
 
-        # 2. No active shift → auto-start only if the message looks like a real fleet
-        #    status update (truck + verb pattern). Noise, tallies, and other messages
-        #    do NOT auto-start a shift.
-        if not self._active and _FLEET_STATUS_RE.search(raw_text or ""):
-            self._start_new(ts, method="auto_start", raw_text=raw_text)
-
+        shift_id = self._find_shift_for_timestamp(ts)
+        if shift_id:
+            self._active = self._load_shift(shift_id)
         self._last_ts = ts
-        return self._active_id()
+        return shift_id
+
+    def resolve_shift_for_event(self, event_timestamp_iso: str) -> Optional[str]:
+        """
+        Find the existing shift covering a specific event timestamp (timestamp_effective).
+        NEVER creates a gap shift. Returns shift_id or None.
+        Used for per-event assignment in the committer.
+        Returns None for blank/malformed timestamps (not the active shift).
+        """
+        if not event_timestamp_iso:
+            return None
+        ts = _parse_iso(event_timestamp_iso)
+        if ts is None:
+            return None
+        return self._find_shift_for_timestamp(ts)
+
+    def _find_shift_for_timestamp(self, ts: datetime) -> Optional[str]:
+        """Find the shift that covers timestamp ts. Returns shift_id or None."""
+        try:
+            ts_iso = ts.isoformat()
+            row = self.conn.execute(
+                """SELECT shift_id FROM shifts
+                   WHERE started_at <= ?
+                     AND (ended_at IS NULL OR ended_at > ?)
+                     AND (is_deleted IS NULL OR is_deleted = 0)
+                   ORDER BY started_at DESC
+                   LIMIT 1""",
+                (ts_iso, ts_iso),
+            ).fetchone()
+            return row["shift_id"] if row else None
+        except Exception:
+            return None
+
+    def _load_shift(self, shift_id: str) -> Optional[dict]:
+        """Load a shift by its ID."""
+        try:
+            row = self.conn.execute(
+                "SELECT * FROM shifts WHERE shift_id=?",
+                (shift_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        except Exception:
+            return None
 
     # ── DB helpers ────────────────────────────────────────────────────────────
 

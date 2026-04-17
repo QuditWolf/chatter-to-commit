@@ -2251,9 +2251,10 @@ async function openEditCommit(eventId) {
       for (let o of sSel.options) if (o.value === ev.site_id)  { o.selected = true; break; }
       for (let o of stSel.options) if (o.value === ev.status)  { o.selected = true; break; }
       if (ev.timestamp_effective) {
-        const d = new Date(ev.timestamp_effective);
-        // datetime-local expects "YYYY-MM-DDTHH:MM"
-        document.getElementById('cm-ts').value = d.toISOString().slice(0,16);
+        // Convert to IST before populating datetime-local input.
+        // toISOString() would give UTC (5:30 behind IST), so we use IST offset instead.
+        const ist = new Date(new Date(ev.timestamp_effective).getTime() + 5.5 * 3600 * 1000);
+        document.getElementById('cm-ts').value = ist.toISOString().slice(0, 16);
       }
     }
   } catch(e) { /* pre-fill optional */ }
@@ -2284,8 +2285,11 @@ async function saveCommitModal() {
     return;
   }
 
-  // Convert datetime-local to ISO
-  const ts = tsRaw ? new Date(tsRaw).toISOString() : null;
+  // Convert datetime-local (entered as IST) to ISO with explicit +05:30 offset.
+  // datetime-local values have no timezone ("YYYY-MM-DDTHH:MM").  The user enters
+  // IST times, so we simply append the IST offset rather than letting new Date()
+  // reinterpret the value in the browser's local timezone (which may not be IST).
+  const ts = tsRaw ? tsRaw + ':00+05:30' : null;
 
   try {
     if (CM.mode === 'add') {
