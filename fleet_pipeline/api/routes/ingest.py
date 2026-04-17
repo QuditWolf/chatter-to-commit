@@ -866,24 +866,38 @@ async def _handle_control_message(
             if _LAST_RE.search(text):
                 shift_id = "last"
             else:
-                # Try to extract shift specifier: "_03" or "2026-04-15_03"
-                _SHIFT_SPEC_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})?(_\d{2})\b")
-                m = _SHIFT_SPEC_RE.search(text)
-                if m:
-                    date_part = m.group(1)  # e.g. "2026-04-15" or None
-                    suffix_part = m.group(2)  # e.g. "_03"
-                    if date_part:
-                        shift_id = f"{date_part}{suffix_part}"
-                    else:
-                        # No date given — try today as primary guess, pass suffix as
-                        # fallback so wa_notifier can search across all dates if today has none
-                        from datetime import datetime
-                        import pytz as _pytz
+                from datetime import datetime
+                import pytz as _pytz
+                _IST = _pytz.timezone("Asia/Kolkata")
+                today = datetime.now(_IST).strftime("%Y-%m-%d")
 
-                        _IST = _pytz.timezone("Asia/Kolkata")
-                        today = datetime.now(_IST).strftime("%Y-%m-%d")
-                        shift_id = f"{today}{suffix_part}"
-                        shift_suffix = suffix_part  # fallback: search any date with this suffix
+                # Pattern priority (first match wins):
+                # 1. Full date+suffix  "2026-04-16_04"
+                # 2. Day+suffix        "16_04"  → expand with current year-month
+                # 3. Suffix only       "_04"    → search most recent shift with that suffix
+                _FULL_RE   = re.compile(r"\b(\d{4}-\d{2}-\d{2})(_\d{2})\b")
+                _DAY_RE    = re.compile(r"\b(\d{1,2})_(\d{2})\b")
+                _SUFFIX_RE = re.compile(r"(?<!\d)(_\d{2})\b")
+
+                mf = _FULL_RE.search(text)
+                md = _DAY_RE.search(text)
+                ms = _SUFFIX_RE.search(text)
+
+                if mf:
+                    # "2026-04-16_04" → exact lookup
+                    shift_id = f"{mf.group(1)}{mf.group(2)}"
+                elif md:
+                    # "16_04" → try current year-month first, suffix fallback
+                    ym = datetime.now(_IST).strftime("%Y-%m")
+                    day = md.group(1).zfill(2)
+                    suffix_part = f"_{md.group(2)}"
+                    shift_id = f"{ym}-{day}{suffix_part}"
+                    shift_suffix = suffix_part
+                elif ms:
+                    # "_04" → try today first, suffix fallback for any date
+                    suffix_part = ms.group(1)
+                    shift_id = f"{today}{suffix_part}"
+                    shift_suffix = suffix_part
             log.info(
                 "[CTRL] Summary request matched (shift_id=%s, shift_suffix=%s) — sending on-demand summary to group",
                 shift_id,

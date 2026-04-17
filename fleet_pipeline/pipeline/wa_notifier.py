@@ -375,10 +375,10 @@ def send_summary_to_group(
                     (shift_id,),
                 ).fetchone()
                 if not shift and shift_suffix:
-                    # Primary guess (today+suffix) not found — search by suffix across all dates
+                    # Primary guess (today+suffix) not found — search by shift_name suffix
                     shift = conn.execute(
                         f"""SELECT shift_id, shift_number, shift_name, ended_at
-                            FROM shifts WHERE shift_id LIKE ? AND {_NOT_DELETED}
+                            FROM shifts WHERE shift_name LIKE ? AND {_NOT_DELETED}
                             ORDER BY started_at DESC LIMIT 1""",
                         (f"%{shift_suffix}",),
                     ).fetchone()
