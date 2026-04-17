@@ -158,6 +158,95 @@ def run_migrations(db_path: str = DB_PATH) -> None:
             else:
                 raise
 
+        # ── Shift-assignment triggers ──────────────────────────────────────────
+        # Drop first so that an updated trigger body is always applied on redeploy.
+        # CREATE TRIGGER IF NOT EXISTS silently skips if the trigger already exists,
+        # which would leave the old (broken) body in place.
+        print("\n[triggers] Reinstalling shift-assignment triggers...")
+        for t in ("trg_events_shift_on_insert",
+                  "trg_events_shift_on_ts_update",
+                  "trg_shifts_recompute_on_boundary_update"):
+            conn.execute(f"DROP TRIGGER IF EXISTS {t}")
+            print(f"  - dropped {t} (if existed)")
+
+        # strftime('%s', ...) converts any ISO-8601 format (Z, +05:30, bare local)
+        # to Unix epoch before comparing. This avoids string-comparison bugs when
+        # timestamp_effective is stored in UTC (Z) but started_at/ended_at in IST (+05:30).
+        conn.execute("""
+            CREATE TRIGGER trg_events_shift_on_insert
+            AFTER INSERT ON events
+            BEGIN
+              UPDATE events SET shift_id = (
+                SELECT s.shift_id FROM shifts s
+                WHERE CAST(strftime('%s', s.started_at) AS INTEGER)
+                        <= CAST(strftime('%s', NEW.timestamp_effective) AS INTEGER)
+                  AND (s.ended_at IS NULL OR
+                       CAST(strftime('%s', s.ended_at) AS INTEGER)
+                         > CAST(strftime('%s', NEW.timestamp_effective) AS INTEGER))
+                  AND (s.is_deleted IS NULL OR s.is_deleted = 0)
+                ORDER BY s.started_at DESC LIMIT 1
+              )
+              WHERE event_id = NEW.event_id;
+            END
+        """)
+        print("  + trg_events_shift_on_insert")
+
+        conn.execute("""
+            CREATE TRIGGER trg_events_shift_on_ts_update
+            AFTER UPDATE OF timestamp_effective ON events
+            BEGIN
+              UPDATE events SET shift_id = (
+                SELECT s.shift_id FROM shifts s
+                WHERE CAST(strftime('%s', s.started_at) AS INTEGER)
+                        <= CAST(strftime('%s', NEW.timestamp_effective) AS INTEGER)
+                  AND (s.ended_at IS NULL OR
+                       CAST(strftime('%s', s.ended_at) AS INTEGER)
+                         > CAST(strftime('%s', NEW.timestamp_effective) AS INTEGER))
+                  AND (s.is_deleted IS NULL OR s.is_deleted = 0)
+                ORDER BY s.started_at DESC LIMIT 1
+              )
+              WHERE event_id = NEW.event_id;
+            END
+        """)
+        print("  + trg_events_shift_on_ts_update")
+
+        conn.execute("""
+            CREATE TRIGGER trg_shifts_recompute_on_boundary_update
+            AFTER UPDATE OF started_at, ended_at ON shifts
+            BEGIN
+              UPDATE events SET shift_id = (
+                SELECT s.shift_id FROM shifts s
+                WHERE CAST(strftime('%s', s.started_at) AS INTEGER)
+                        <= CAST(strftime('%s', events.timestamp_effective) AS INTEGER)
+                  AND (s.ended_at IS NULL OR
+                       CAST(strftime('%s', s.ended_at) AS INTEGER)
+                         > CAST(strftime('%s', events.timestamp_effective) AS INTEGER))
+                  AND (s.is_deleted IS NULL OR s.is_deleted = 0)
+                ORDER BY s.started_at DESC LIMIT 1
+              )
+              WHERE commit_status != 'DELETED';
+            END
+        """)
+        print("  + trg_shifts_recompute_on_boundary_update")
+
+        # ── Backfill: recompute shift_id for all existing events ──────────────
+        # Uses epoch comparison so mixed-timezone storage (UTC Z vs IST +05:30) works.
+        print("\n[backfill] Recomputing shift_id for all existing events...")
+        result = conn.execute("""
+            UPDATE events SET shift_id = (
+              SELECT s.shift_id FROM shifts s
+              WHERE CAST(strftime('%s', s.started_at) AS INTEGER)
+                      <= CAST(strftime('%s', events.timestamp_effective) AS INTEGER)
+                AND (s.ended_at IS NULL OR
+                     CAST(strftime('%s', s.ended_at) AS INTEGER)
+                       > CAST(strftime('%s', events.timestamp_effective) AS INTEGER))
+                AND (s.is_deleted IS NULL OR s.is_deleted = 0)
+              ORDER BY s.started_at DESC LIMIT 1
+            )
+            WHERE commit_status != 'DELETED'
+        """)
+        print(f"  + {result.rowcount} events recomputed")
+
         conn.commit()
 
     print("\nMigrations complete.")

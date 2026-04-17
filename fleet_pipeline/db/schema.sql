@@ -214,3 +214,58 @@ CREATE INDEX IF NOT EXISTS idx_wa_messages_received ON wa_messages(received_at);
 CREATE INDEX IF NOT EXISTS idx_shifts_started ON shifts(started_at);
 CREATE INDEX IF NOT EXISTS idx_corrections_event ON corrections(original_event_id);
 CREATE INDEX IF NOT EXISTS idx_llm_outputs_msg ON llm_outputs(msg_id);
+
+-- ── Shift assignment triggers ─────────────────────────────────────────────────
+-- Always derive events.shift_id from timestamp_effective vs shifts.started_at/ended_at.
+-- Stored shift_id is overwritten by these triggers on every insert/update so it
+-- stays correct even when shift boundaries are edited or event timestamps are corrected.
+
+-- strftime('%s', ...) normalises any ISO-8601 format (Z, +05:30, bare) to
+-- Unix epoch before comparing, so mixed timezone storage never causes mismatches.
+CREATE TRIGGER IF NOT EXISTS trg_events_shift_on_insert
+AFTER INSERT ON events
+BEGIN
+  UPDATE events SET shift_id = (
+    SELECT s.shift_id FROM shifts s
+    WHERE CAST(strftime('%s', s.started_at) AS INTEGER)
+            <= CAST(strftime('%s', NEW.timestamp_effective) AS INTEGER)
+      AND (s.ended_at IS NULL OR
+           CAST(strftime('%s', s.ended_at) AS INTEGER)
+             > CAST(strftime('%s', NEW.timestamp_effective) AS INTEGER))
+      AND (s.is_deleted IS NULL OR s.is_deleted = 0)
+    ORDER BY s.started_at DESC LIMIT 1
+  )
+  WHERE event_id = NEW.event_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_events_shift_on_ts_update
+AFTER UPDATE OF timestamp_effective ON events
+BEGIN
+  UPDATE events SET shift_id = (
+    SELECT s.shift_id FROM shifts s
+    WHERE CAST(strftime('%s', s.started_at) AS INTEGER)
+            <= CAST(strftime('%s', NEW.timestamp_effective) AS INTEGER)
+      AND (s.ended_at IS NULL OR
+           CAST(strftime('%s', s.ended_at) AS INTEGER)
+             > CAST(strftime('%s', NEW.timestamp_effective) AS INTEGER))
+      AND (s.is_deleted IS NULL OR s.is_deleted = 0)
+    ORDER BY s.started_at DESC LIMIT 1
+  )
+  WHERE event_id = NEW.event_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_shifts_recompute_on_boundary_update
+AFTER UPDATE OF started_at, ended_at ON shifts
+BEGIN
+  UPDATE events SET shift_id = (
+    SELECT s.shift_id FROM shifts s
+    WHERE CAST(strftime('%s', s.started_at) AS INTEGER)
+            <= CAST(strftime('%s', events.timestamp_effective) AS INTEGER)
+      AND (s.ended_at IS NULL OR
+           CAST(strftime('%s', s.ended_at) AS INTEGER)
+             > CAST(strftime('%s', events.timestamp_effective) AS INTEGER))
+      AND (s.is_deleted IS NULL OR s.is_deleted = 0)
+    ORDER BY s.started_at DESC LIMIT 1
+  )
+  WHERE commit_status != 'DELETED';
+END;

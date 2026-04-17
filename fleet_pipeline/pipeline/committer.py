@@ -57,6 +57,30 @@ CYCLE_GAP_THRESHOLD_SECONDS = 60 * 60  # kept for log messages only
 # Cycle status order for detecting same/earlier cycle position
 _CYCLE_ORDER = {"ENTER": 0, "LS": 1, "US": 1, "LO": 2, "UO": 2, "LEFT": 3}
 
+
+def _resolve_shift_for_ts(conn, timestamp_iso: str) -> Optional[str]:
+    """Find the shift whose window covers timestamp_iso. Returns shift_id or None.
+    Uses strftime('%s', ...) on both sides so UTC-Z and IST+05:30 timestamps
+    compare correctly regardless of how they were stored.
+    """
+    if not timestamp_iso:
+        return None
+    try:
+        row = conn.execute(
+            """SELECT shift_id FROM shifts
+               WHERE CAST(strftime('%s', started_at) AS INTEGER)
+                       <= CAST(strftime('%s', ?) AS INTEGER)
+                 AND (ended_at IS NULL OR
+                      CAST(strftime('%s', ended_at) AS INTEGER)
+                        > CAST(strftime('%s', ?) AS INTEGER))
+                 AND (is_deleted IS NULL OR is_deleted = 0)
+               ORDER BY started_at DESC LIMIT 1""",
+            (timestamp_iso, timestamp_iso),
+        ).fetchone()
+        return row["shift_id"] if row else None
+    except Exception:
+        return None
+
 # Default durations for inferring missing events
 _DEFAULT_ENTER_TO_LS_SECONDS = 5 * 60  # 5 min
 _DEFAULT_LS_TO_LO_SECONDS = 30 * 60  # 30 min
@@ -1348,16 +1372,34 @@ class Committer:
                     ev["_orig_site_id"] = ev["site_id"]
                     ev["site_id"] = None
 
+        # ── First pass: resolve per-event shift from timestamp_effective ─────────
+        # Must run BEFORE cycle gap detection so that both cycle-gap logic and
+        # the main event loop use the shift that covers the event's timestamp,
+        # not the shift that was active when the WA message was received.
+        for _ev in events:
+            _fts = _ev.get("timestamp_effective", "")
+            if _fts:
+                _fshift = _resolve_shift_for_ts(conn, _fts)
+                if _fshift:
+                    _ev["shift_id"] = _fshift
+
+        # Derive effective shift for cycle gap detection from the first event that
+        # has a resolved shift (all events in one message share a timestamp).
+        _effective_shift_id = next(
+            (_ev.get("shift_id") for _ev in events if _ev.get("shift_id")),
+            resolved_shift_id,
+        )
+
         # ── Cycle gap detection (BEFORE expanded loop) ────────────────────────
         # Detect incomplete previous cycles and insert inferred completion events
         # directly into the DB now, BEFORE the expanded loop runs
         # _needs_inferred_enter(). That way the DB already has the inferred LEFT
         # and will correctly inject an ENTER for the new cycle.
-        if resolved_shift_id and not self.simulation_run_id:
+        if _effective_shift_id and not self.simulation_run_id:
             _cycle_notifs, _blocking_hitl_items = _detect_and_fill_cycle_gap(
                 conn,
                 events,
-                resolved_shift_id,
+                _effective_shift_id,
                 self.db_path,
                 msg_id=msg_id,
                 processing_id=processing_id,
@@ -1506,9 +1548,10 @@ class Committer:
 
             # Determine per-event shift from timestamp_effective BEFORE site inference
             # so site inference uses the correct shift.
+            # Uses conn directly — shift_detector is not required.
             _ev_ts = ev.get("timestamp_effective", "")
-            if _ev_ts and self.shift_detector:
-                _per_shift = self.shift_detector.resolve_shift_for_event(_ev_ts)
+            if _ev_ts:
+                _per_shift = _resolve_shift_for_ts(conn, _ev_ts)
                 if _per_shift:
                     ev["shift_id"] = _per_shift
 
