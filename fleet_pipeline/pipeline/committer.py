@@ -1372,13 +1372,19 @@ class Committer:
                     ev["_orig_site_id"] = ev["site_id"]
                     ev["site_id"] = None
 
-        # ── First pass: resolve per-event shift from timestamp_effective ─────────
-        # Must run BEFORE cycle gap detection so that both cycle-gap logic and
-        # the main event loop use the shift that covers the event's timestamp,
-        # not the shift that was active when the WA message was received.
+        # ── First pass: normalise timestamps to IST + resolve per-event shift ───
+        # Normalise timestamp_effective to IST ("+05:30") before anything else.
+        # LLM sometimes outputs UTC ("Z") or bare local; _parse_ts + _fmt_ts
+        # converts to IST so DB always stores a consistent, human-readable format.
+        # Must run BEFORE cycle gap detection so both gap logic and the main loop
+        # use the shift covering the event's timestamp, not the receive-time shift.
         for _ev in events:
             _fts = _ev.get("timestamp_effective", "")
             if _fts:
+                _fts_dt = _parse_ts(_fts)
+                if _fts_dt is not None:
+                    _fts = _fmt_ts(_fts_dt)
+                    _ev["timestamp_effective"] = _fts
                 _fshift = _resolve_shift_for_ts(conn, _fts)
                 if _fshift:
                     _ev["shift_id"] = _fshift

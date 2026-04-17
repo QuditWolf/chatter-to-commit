@@ -229,6 +229,36 @@ def run_migrations(db_path: str = DB_PATH) -> None:
         """)
         print("  + trg_shifts_recompute_on_boundary_update")
 
+        # ── Backfill: normalise timestamp_effective to IST ────────────────────
+        # Convert any UTC timestamps (Z or +00:00 suffix) to IST (+05:30).
+        # Only touches explicitly UTC rows — bare or already-IST rows untouched.
+        print("\n[backfill] Normalising timestamp_effective to IST...")
+        from datetime import timezone, timedelta
+
+        _IST = timezone(timedelta(hours=5, minutes=30))
+        conn.row_factory = sqlite3.Row
+        _utc_rows = conn.execute(
+            """SELECT event_id, timestamp_effective FROM events
+               WHERE commit_status != 'DELETED'
+                 AND (timestamp_effective LIKE '%Z'
+                      OR timestamp_effective LIKE '%+00:00')"""
+        ).fetchall()
+        _ts_fixed = 0
+        for _row in _utc_rows:
+            try:
+                _ts_raw = _row["timestamp_effective"].replace("Z", "+00:00")
+                from datetime import datetime as _dt
+                _parsed = _dt.fromisoformat(_ts_raw)
+                _ist_str = _parsed.astimezone(_IST).isoformat()
+                conn.execute(
+                    "UPDATE events SET timestamp_effective = ? WHERE event_id = ?",
+                    (_ist_str, _row["event_id"]),
+                )
+                _ts_fixed += 1
+            except Exception:
+                pass
+        print(f"  + {_ts_fixed} timestamps converted UTC → IST")
+
         # ── Backfill: recompute shift_id for all existing events ──────────────
         # Uses epoch comparison so mixed-timezone storage (UTC Z vs IST +05:30) works.
         print("\n[backfill] Recomputing shift_id for all existing events...")
