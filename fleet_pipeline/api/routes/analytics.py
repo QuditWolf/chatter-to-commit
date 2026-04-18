@@ -444,7 +444,7 @@ def shift_summary(shift_id: str = Query("")):
             f"""
             SELECT e.site_id, COALESCE(s.display_name, e.site_id) as site_name, COUNT(*) as n
             FROM events e LEFT JOIN sites s ON e.site_id=s.site_id
-            WHERE e.commit_status='COMMITTED' AND e.status='LO'
+            WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='LO'
               AND s.site_type='loading' {shift_filter}
             GROUP BY e.site_id ORDER BY n DESC
         """,
@@ -456,7 +456,7 @@ def shift_summary(shift_id: str = Query("")):
             f"""
             SELECT e.site_id, COALESCE(s.display_name, e.site_id) as site_name, COUNT(*) as n
             FROM events e LEFT JOIN sites s ON e.site_id=s.site_id
-            WHERE e.commit_status='COMMITTED' AND e.status='ENTER'
+            WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='ENTER'
               AND s.site_type='unloading' {shift_filter}
             GROUP BY e.site_id ORDER BY n DESC
         """,
@@ -468,14 +468,14 @@ def shift_summary(shift_id: str = Query("")):
             f"""
             SELECT e.site_id, COALESCE(s.display_name, e.site_id) as site_name, COUNT(*) as n
             FROM events e LEFT JOIN sites s ON e.site_id=s.site_id
-            WHERE e.commit_status='COMMITTED' AND e.status='UO'
+            WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='UO'
               AND s.site_type='unloading' {shift_filter}
             GROUP BY e.site_id ORDER BY n DESC
         """,
             bind,
         ).fetchall()
 
-        # Trucks currently in loading (latest committed event per truck = LS, site_type=loading)
+        # Trucks currently in loading (latest committed/flagged event per truck = LS, site_type=loading)
         in_loading_rows = conn.execute(
             f"""
             SELECT COALESCE(t.display_name, e.truck_alias, e.truck_id) as label,
@@ -483,12 +483,12 @@ def shift_summary(shift_id: str = Query("")):
             FROM events e
             LEFT JOIN trucks t ON e.truck_id=t.truck_id
             LEFT JOIN sites  s ON e.site_id=s.site_id
-            WHERE e.commit_status='COMMITTED' AND e.status='LS'
+            WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='LS'
               AND s.site_type='loading' AND e.truck_id IS NOT NULL
               {shift_filter}
               AND e.rowid IN (
                 SELECT MAX(rowid) FROM events
-                WHERE commit_status='COMMITTED' AND truck_id IS NOT NULL
+                WHERE commit_status IN ('COMMITTED','FLAGGED') AND truck_id IS NOT NULL
                   {"AND shift_id = ?" if shift_id else ""}
                 GROUP BY truck_id
               )
@@ -504,12 +504,12 @@ def shift_summary(shift_id: str = Query("")):
             FROM events e
             LEFT JOIN trucks t ON e.truck_id=t.truck_id
             LEFT JOIN sites  s ON e.site_id=s.site_id
-            WHERE e.commit_status='COMMITTED' AND e.status='US'
+            WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='US'
               AND s.site_type='unloading' AND e.truck_id IS NOT NULL
               {shift_filter}
               AND e.rowid IN (
                 SELECT MAX(rowid) FROM events
-                WHERE commit_status='COMMITTED' AND truck_id IS NOT NULL
+                WHERE commit_status IN ('COMMITTED','FLAGGED') AND truck_id IS NOT NULL
                   {"AND shift_id = ?" if shift_id else ""}
                 GROUP BY truck_id
               )
@@ -524,7 +524,7 @@ def shift_summary(shift_id: str = Query("")):
                    COALESCE(e.truck_alias, e.truck_id) as alias,
                    COUNT(*) as loads
             FROM events e
-            WHERE e.commit_status='COMMITTED' AND e.status='LO' {shift_filter}
+            WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='LO' {shift_filter}
             GROUP BY e.truck_id ORDER BY loads DESC, e.truck_id
         """,
             bind,
@@ -536,7 +536,7 @@ def shift_summary(shift_id: str = Query("")):
             f"""
             SELECT e.truck_id, COUNT(*) as unloads
             FROM events e
-            WHERE e.commit_status='COMMITTED' AND e.status='UO' {shift_filter}
+            WHERE e.commit_status IN ('COMMITTED','FLAGGED') AND e.status='UO' {shift_filter}
             GROUP BY e.truck_id
         """,
             bind,
