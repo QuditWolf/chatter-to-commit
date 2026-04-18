@@ -2056,10 +2056,12 @@ async function openAddShift() {
       sel.appendChild(o);
     });
   } catch(_) {}
-  // Default start = now in local time
+  // Default start = now in IST (UTC+5:30)
   const now = new Date();
-  now.setSeconds(0, 0);
-  document.getElementById('sm-start').value = now.toISOString().slice(0, 16);
+  const istOffset = 5.5 * 60 * 60000;
+  const istNow = new Date(now.getTime() + istOffset - now.getTimezoneOffset() * 60000);
+  istNow.setSeconds(0, 0);
+  document.getElementById('sm-start').value = istNow.toISOString().slice(0, 16);
   document.getElementById('sm-end').value = '';
   document.getElementById('sm-error').style.display = 'none';
   const modal = document.getElementById('shift-modal');
