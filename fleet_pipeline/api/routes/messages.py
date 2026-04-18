@@ -733,6 +733,26 @@ def list_shift_events(
     return {"items": [dict(r) for r in rows]}
 
 
+@router.post("/api/shift-events/{shift_event_id}/delete")
+def delete_shift_event(shift_event_id: str):
+    """Soft-delete a single shift event (SHIFT_START or SHIFT_END) by ID."""
+    import logging
+    from fastapi import HTTPException
+
+    with db.db_conn(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT * FROM shift_events WHERE shift_event_id=?", (shift_event_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Shift event not found")
+        conn.execute(
+            "UPDATE shift_events SET commit_status='DELETED' WHERE shift_event_id=?",
+            (shift_event_id,),
+        )
+    logging.getLogger(__name__).info("[SE] Deleted shift event %s", shift_event_id)
+    return {"deleted": True, "shift_event_id": shift_event_id}
+
+
 @router.post("/api/shifts/{shift_id}/delete")
 def delete_shift(shift_id: str, mode: str = "orphan"):
     """Soft-delete a shift.

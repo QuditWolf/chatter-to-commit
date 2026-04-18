@@ -1993,13 +1993,16 @@ async function loadShiftEvents() {
         : '<span class="dot red" style="margin-right:3px"></span>Deleted';
       const waId = ev.wa_message_id ? `${ev.wa_message_id.slice(0,12)}…` : '–';
       const shiftInfo = shiftMap[ev.shift_id] || {};
+      const delBtn = ev.commit_status !== 'DELETED'
+        ? `<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:var(--color-status-held)" onclick="deleteShiftEvent('${ev.shift_event_id}')" title="Soft-delete this shift event">Del</button>`
+        : '';
       return `<tr>
         <td style="font-weight:500">${escHtml(shiftInfo.shift_name || ev.shift_id)}</td>
         <td>${statusBadge}</td>
         <td style="color:var(--color-text-secondary)">${fmtTime(ev.timestamp_iso)}</td>
         <td>${stateBadge}</td>
         <td style="font-size:10px;font-family:var(--font-mono)">${waId}</td>
-        <td></td>
+        <td>${delBtn}</td>
       </tr>`;
     }).join('');
 
@@ -2087,6 +2090,16 @@ async function saveShift() {
   } catch(e) {
     errEl.textContent = e.message || 'Failed to create shift.';
     errEl.style.display = '';
+  }
+}
+
+async function deleteShiftEvent(shiftEventId) {
+  if (!confirm('Delete this shift event?')) return;
+  try {
+    await API(`/api/shift-events/${shiftEventId}/delete`, { method: 'POST' });
+    loadShiftEvents();
+  } catch(e) {
+    alert('Delete failed: ' + (e.message || e));
   }
 }
 
