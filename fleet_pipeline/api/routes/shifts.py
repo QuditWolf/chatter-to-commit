@@ -210,10 +210,67 @@ async def shift_create(req: CreateShiftRequest):
                 (f"shift_end_{shift_id}", shift_id, "SHIFT_END", ts_end.isoformat(), "COMMITTED"),
             )
 
+        # Retroactively assign orphaned events whose timestamp_effective falls
+        # within this shift's window and currently have no shift assigned.
+        ts_end_param = ts_end.isoformat() if ts_end else "9999-12-31T23:59:59"
+        reassigned = conn.execute(
+            """UPDATE events
+               SET shift_id = ?
+               WHERE shift_id IS NULL
+                 AND commit_status IN ('COMMITTED', 'FLAGGED', 'HELD')
+                 AND timestamp_effective >= ?
+                 AND timestamp_effective <= ?""",
+            (shift_id, ts_start.isoformat(), ts_end_param),
+        ).rowcount
+
+    import logging as _log
+    _log.getLogger(__name__).info(
+        "[SHIFT] Manual shift %s created — retroactively assigned %d orphaned event(s)",
+        shift_name, reassigned,
+    )
+
     await ws_manager.broadcast("shift_changed", {"reason": "manual_create", "shift_id": shift_id})
     return {
         "shift_id": shift_id,
         "shift_name": shift_name,
         "started_at": ts_start.isoformat(),
         "ended_at": ts_end.isoformat() if ts_end else None,
+        "events_reassigned": reassigned,
     }
+
+
+@router.post("/{shift_id}/reassign-orphans")
+async def shift_reassign_orphans(shift_id: str):
+    """Retroactively assign orphaned events (shift_id IS NULL) that fall within
+    this shift's time window. Useful for shifts that were created after events
+    were already processed.
+    """
+    import logging as _log
+    from fleet_pipeline.api.main import ws_manager
+
+    with db.db_conn(DB_PATH) as conn:
+        shift = conn.execute(
+            "SELECT * FROM shifts WHERE shift_id=? AND (is_deleted IS NULL OR is_deleted=0)",
+            (shift_id,),
+        ).fetchone()
+        if not shift:
+            raise HTTPException(status_code=404, detail="Shift not found")
+
+        shift = dict(shift)
+        ts_end_param = shift["ended_at"] if shift["ended_at"] else "9999-12-31T23:59:59"
+        reassigned = conn.execute(
+            """UPDATE events
+               SET shift_id = ?
+               WHERE shift_id IS NULL
+                 AND commit_status IN ('COMMITTED', 'FLAGGED', 'HELD')
+                 AND timestamp_effective >= ?
+                 AND timestamp_effective <= ?""",
+            (shift_id, shift["started_at"], ts_end_param),
+        ).rowcount
+
+    _log.getLogger(__name__).info(
+        "[SHIFT] Reassigned %d orphaned event(s) into shift %s",
+        reassigned, shift["shift_name"],
+    )
+    await ws_manager.broadcast("fleet_state_updated", {"source": "shift_reassign"})
+    return {"shift_id": shift_id, "shift_name": shift["shift_name"], "events_reassigned": reassigned}

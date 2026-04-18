@@ -2019,6 +2019,7 @@ async function loadShiftEvents() {
         actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px" onclick="mergeShiftInto('${s.shift_id}')" title="Merge into shift below">Merge↓</button>`);
       }
       // Always offer two delete options
+      actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:#1d4ed8" onclick="reassignOrphans('${s.shift_id}','${escHtml(s.shift_name)}')" title="Assign orphaned events (no shift) within this time window to this shift">Reassign</button>`);
       actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:#92400e" onclick="deleteShift('${s.shift_id}','orphan')" title="Delete shift, keep events (detach from shift)">Del</button>`);
       actions.push(`<button class="save-alias-btn" style="font-size:10px;padding:2px 6px;color:var(--color-status-held)" onclick="deleteShift('${s.shift_id}','cascade')" title="Delete shift and all its events">Del+</button>`);
       const row = document.createElement('tr');
@@ -2086,6 +2087,17 @@ async function saveShift() {
   } catch(e) {
     errEl.textContent = e.message || 'Failed to create shift.';
     errEl.style.display = '';
+  }
+}
+
+async function reassignOrphans(shiftId, shiftName) {
+  try {
+    const d = await API(`/api/shifts/${shiftId}/reassign-orphans`, { method: 'POST' });
+    alert(`Reassigned ${d.events_reassigned} orphaned event(s) into ${shiftName}.`);
+    loadShiftEvents();
+    loadCommits();
+  } catch(e) {
+    alert('Reassign failed: ' + (e.message || e));
   }
 }
 
