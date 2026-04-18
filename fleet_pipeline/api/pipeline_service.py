@@ -212,6 +212,42 @@ def process_raw_text(
         _had_active = bool(sd._active)
         shift_id = sd.process_message(raw_text, timestamp_iso)
         _auto_started_shift = dict(sd._active) if (not _had_active and sd._active) else None
+
+        # Auto-start shift for live fleet messages (no adjusted timestamp):
+        # If no shift covers this message and it arrived within 10 min of now,
+        # it's a real-time message → automatically open a new shift.
+        if shift_id is None and not _had_active and source == "whatsapp":
+            try:
+                from fleet_pipeline.pipeline.shift_detector import _parse_iso as _sd_parse
+                _ts_live = _sd_parse(timestamp_iso)
+                if _ts_live is not None:
+                    _delta_secs = abs((now_ist() - _ts_live).total_seconds())
+                    if _delta_secs <= 600:  # within 10 minutes = live message
+                        sd._start_new(_ts_live, method="auto_fleet")
+                        if sd._active:
+                            _sd_conn.execute(
+                                """INSERT OR IGNORE INTO shift_events
+                                   (shift_event_id, shift_id, status, timestamp_iso, commit_status, wa_message_id)
+                                   VALUES (?, ?, ?, ?, ?, ?)""",
+                                (
+                                    f"shift_start_{sd._active['shift_id']}",
+                                    sd._active["shift_id"],
+                                    "SHIFT_START",
+                                    _ts_live.isoformat(),
+                                    "COMMITTED",
+                                    wa_message_id or f"auto_fleet_{msg_id}",
+                                ),
+                            )
+                            shift_id = sd._active_id()
+                            _auto_started_shift = dict(sd._active)
+                            log.info(
+                                "[SHIFT] Auto-started shift %s for live fleet message (delta=%.0fs)",
+                                shift_id[:8] if shift_id else "?",
+                                _delta_secs,
+                            )
+            except Exception as _as_exc:
+                log.warning("[SHIFT] Auto-start failed: %s", _as_exc)
+
         _sd_conn.commit()
         _sd_conn.close()
 

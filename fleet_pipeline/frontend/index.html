@@ -727,7 +727,10 @@ tr:last-child td { border-bottom: none; }
     <div style="margin-top:20px;padding-top:16px;border-top:0.5px solid var(--color-border-secondary)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
         <h3 style="margin:0;font-size:13px;font-weight:600">Shifts</h3>
-        <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="loadShiftEvents()">Refresh</button>
+        <div style="display:flex;gap:6px">
+          <button class="btn-primary" style="font-size:11px;padding:4px 10px" onclick="openAddShift()">+ Add Shift</button>
+          <button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="loadShiftEvents()">Refresh</button>
+        </div>
       </div>
       <table id="shift-table" style="width:100%;table-layout:fixed;font-size:11px">
         <thead><tr>
@@ -748,6 +751,31 @@ tr:last-child td { border-bottom: none; }
         </tr></thead>
         <tbody id="se-body"><tr><td colspan="6" class="empty-state">No shift events</td></tr></tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Add Shift modal -->
+  <div id="shift-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:999;align-items:center;justify-content:center">
+    <div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-primary);border-radius:var(--border-radius-lg);padding:24px;width:360px;max-width:95vw">
+      <h3 style="margin:0 0 16px;font-size:14px;font-weight:600">Add Shift</h3>
+      <div style="display:grid;gap:10px">
+        <label style="font-size:12px;color:var(--color-text-secondary)">Start time (IST)
+          <input type="datetime-local" id="sm-start" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px;box-sizing:border-box">
+        </label>
+        <label style="font-size:12px;color:var(--color-text-secondary)">End time (IST) <span style="opacity:0.5">— optional, leave blank for active shift</span>
+          <input type="datetime-local" id="sm-end" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px;box-sizing:border-box">
+        </label>
+        <label style="font-size:12px;color:var(--color-text-secondary)">Default site <span style="opacity:0.5">— optional</span>
+          <select id="sm-site" style="display:block;width:100%;margin-top:4px;padding:6px 8px;border:0.5px solid var(--color-border-secondary);border-radius:var(--border-radius-md);background:var(--color-background-primary);color:var(--color-text-primary);font-size:12px">
+            <option value="">None</option>
+          </select>
+        </label>
+        <div id="sm-error" style="color:var(--color-status-held);font-size:11px;display:none"></div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn-secondary" style="font-size:12px" onclick="closeShiftModal()">Cancel</button>
+        <button class="btn-primary" style="font-size:12px" onclick="saveShift()">Create Shift</button>
+      </div>
     </div>
   </div>
 
@@ -2008,6 +2036,57 @@ async function loadShiftEvents() {
   } catch(e) {
     tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e.message}</td></tr>`;
     shiftBody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e.message}</td></tr>`;
+  }
+}
+
+async function openAddShift() {
+  // Populate site dropdown
+  const sel = document.getElementById('sm-site');
+  sel.innerHTML = '<option value="">None</option>';
+  try {
+    const d = await API('/api/registry/sites');
+    (d.sites || []).forEach(s => {
+      const o = document.createElement('option');
+      o.value = s.site_id;
+      o.textContent = s.site_id + (s.name ? ` — ${s.name}` : '');
+      sel.appendChild(o);
+    });
+  } catch(_) {}
+  // Default start = now in local time
+  const now = new Date();
+  now.setSeconds(0, 0);
+  document.getElementById('sm-start').value = now.toISOString().slice(0, 16);
+  document.getElementById('sm-end').value = '';
+  document.getElementById('sm-error').style.display = 'none';
+  const modal = document.getElementById('shift-modal');
+  modal.style.display = 'flex';
+}
+
+function closeShiftModal() {
+  document.getElementById('shift-modal').style.display = 'none';
+}
+
+async function saveShift() {
+  const startVal = document.getElementById('sm-start').value;
+  const endVal   = document.getElementById('sm-end').value;
+  const siteVal  = document.getElementById('sm-site').value;
+  const errEl    = document.getElementById('sm-error');
+  errEl.style.display = 'none';
+  if (!startVal) { errEl.textContent = 'Start time is required.'; errEl.style.display = ''; return; }
+  // Treat datetime-local value as IST (+05:30)
+  const toIST = v => v ? v + ':00+05:30' : null;
+  try {
+    await API('/api/shifts/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ started_at: toIST(startVal), ended_at: toIST(endVal) || null, site_id: siteVal || null }),
+    });
+    closeShiftModal();
+    loadShiftEvents();
+    populateShiftSelectors();
+  } catch(e) {
+    errEl.textContent = e.message || 'Failed to create shift.';
+    errEl.style.display = '';
   }
 }
 
