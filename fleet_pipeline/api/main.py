@@ -211,6 +211,7 @@ async def lifespan(application: FastAPI):
                 continue
 
             # New-events guard — only send if event count changed since last send
+            _current_count = None
             try:
                 with _sq3.connect(_DB_PATH2) as _ec:
                     _count_row = _ec.execute(
@@ -240,7 +241,8 @@ async def lifespan(application: FastAPI):
                 await _loop.run_in_executor(
                     None, _partial(_send_summary, summary_jid, _DB_PATH2)
                 )
-                _last_sent_event_count[_shift_id] = _current_count
+                if _current_count is not None:
+                    _last_sent_event_count[_shift_id] = _current_count
                 log.info(
                     "Periodic 15-min summary posted (shift=%s events=%d jid=%s…)",
                     _shift_id[:8], _current_count, summary_jid[:8],
