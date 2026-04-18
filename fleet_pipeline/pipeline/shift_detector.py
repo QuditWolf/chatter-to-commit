@@ -185,8 +185,21 @@ class ShiftDetector:
 
     def _load_active(self):
         try:
+            # A shift is only truly active if:
+            # 1. ended_at IS NULL
+            # 2. No newer shift (started_at > this one) exists — if a newer shift was
+            #    created after this one it means this one was superseded and should be
+            #    treated as closed even if its ended_at was never set.
             row = self.conn.execute(
-                "SELECT * FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0) ORDER BY started_at DESC LIMIT 1"
+                """SELECT * FROM shifts sh
+                   WHERE sh.ended_at IS NULL
+                     AND (sh.is_deleted IS NULL OR sh.is_deleted = 0)
+                     AND NOT EXISTS (
+                       SELECT 1 FROM shifts s2
+                       WHERE s2.started_at > sh.started_at
+                         AND (s2.is_deleted IS NULL OR s2.is_deleted = 0)
+                     )
+                   ORDER BY sh.started_at DESC LIMIT 1"""
             ).fetchone()
             return dict(row) if row else None
         except Exception:
