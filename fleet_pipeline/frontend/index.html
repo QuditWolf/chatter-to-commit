@@ -2078,7 +2078,6 @@ async function saveShift() {
   try {
     await API('/api/shifts/create', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ started_at: toIST(startVal), ended_at: toIST(endVal) || null, site_id: siteVal || null }),
     });
     closeShiftModal();
