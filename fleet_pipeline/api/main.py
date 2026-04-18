@@ -166,11 +166,16 @@ async def lifespan(application: FastAPI):
                 log.warning("Auto-end shift check failed: %s", _exc)
 
     async def _periodic_summary_loop():
-        """Post a shift summary to the control group every 15 minutes (only when a shift is active)."""
+        """Post a shift summary to the control group every 15 minutes.
+        Only sends when:
+        - There is a truly active shift (not superseded/deleted)
+        - At least one new COMMITTED/FLAGGED event has arrived since the last send
+        """
+        _last_sent_event_count: dict = {}  # shift_id -> event count at last send
+
         while True:
             await asyncio.sleep(900)  # 15 minutes
 
-            # Read config fresh each iteration — guards against import-time empty values
             import sqlite3 as _sq3
             import os as _os
             from fleet_pipeline.config import DB_PATH as _DB_PATH2
@@ -182,18 +187,48 @@ async def lifespan(application: FastAPI):
                 log.info("Periodic summary: no WA group JID configured — skipping")
                 continue
 
-            # Only send when there is an active (open) shift
+            # Active shift check — same guard as get_active_shift / _load_active
             try:
                 with _sq3.connect(_DB_PATH2) as _chk:
+                    _chk.row_factory = _sq3.Row
                     _active = _chk.execute(
-                        "SELECT shift_id FROM shifts WHERE ended_at IS NULL AND (is_deleted IS NULL OR is_deleted = 0) LIMIT 1"
+                        """SELECT shift_id FROM shifts sh
+                           WHERE sh.ended_at IS NULL
+                             AND (sh.is_deleted IS NULL OR sh.is_deleted = 0)
+                             AND NOT EXISTS (
+                               SELECT 1 FROM shifts s2
+                               WHERE s2.started_at > sh.started_at
+                                 AND (s2.is_deleted IS NULL OR s2.is_deleted = 0)
+                             )
+                           ORDER BY sh.started_at DESC LIMIT 1"""
                     ).fetchone()
                 if not _active:
                     log.info("Periodic summary: no active shift — skipping")
                     continue
+                _shift_id = _active["shift_id"]
             except Exception as _chk_exc:
                 log.warning("Periodic summary shift-check failed: %s", _chk_exc)
                 continue
+
+            # New-events guard — only send if event count changed since last send
+            try:
+                with _sq3.connect(_DB_PATH2) as _ec:
+                    _count_row = _ec.execute(
+                        """SELECT COUNT(*) FROM events
+                           WHERE shift_id=? AND commit_status IN ('COMMITTED','FLAGGED')""",
+                        (_shift_id,),
+                    ).fetchone()
+                _current_count = _count_row[0] if _count_row else 0
+                _prev_count = _last_sent_event_count.get(_shift_id, -1)
+                if _current_count == _prev_count:
+                    log.info(
+                        "Periodic summary: no new events since last send (shift=%s count=%d) — skipping",
+                        _shift_id[:8], _current_count,
+                    )
+                    continue
+            except Exception as _ec_exc:
+                log.warning("Periodic summary event-count check failed: %s", _ec_exc)
+                # Fall through and send anyway if count check fails
 
             try:
                 from fleet_pipeline.pipeline.wa_notifier import (
@@ -205,7 +240,11 @@ async def lifespan(application: FastAPI):
                 await _loop.run_in_executor(
                     None, _partial(_send_summary, summary_jid, _DB_PATH2)
                 )
-                log.info("Periodic 15-min summary posted (jid=%s…)", summary_jid[:8])
+                _last_sent_event_count[_shift_id] = _current_count
+                log.info(
+                    "Periodic 15-min summary posted (shift=%s events=%d jid=%s…)",
+                    _shift_id[:8], _current_count, summary_jid[:8],
+                )
             except Exception as _exc:
                 log.warning("Periodic summary post failed: %s", _exc)
 

@@ -580,8 +580,19 @@ def insert_shift(conn: sqlite3.Connection, shift: Dict[str, Any]) -> None:
 
 
 def get_active_shift(conn: sqlite3.Connection) -> Optional[Dict]:
+    # A shift is active only if:
+    # 1. ended_at IS NULL and not soft-deleted
+    # 2. No newer shift was started after it (superseded-but-unclosed guard)
     row = conn.execute(
-        "SELECT * FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+        """SELECT * FROM shifts sh
+           WHERE sh.ended_at IS NULL
+             AND (sh.is_deleted IS NULL OR sh.is_deleted = 0)
+             AND NOT EXISTS (
+               SELECT 1 FROM shifts s2
+               WHERE s2.started_at > sh.started_at
+                 AND (s2.is_deleted IS NULL OR s2.is_deleted = 0)
+             )
+           ORDER BY sh.started_at DESC LIMIT 1"""
     ).fetchone()
     return dict(row) if row else None
 
